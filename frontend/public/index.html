@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Support Ticket Triage</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: Arial, sans-serif;
+      background: #f0f2f5;
+      color: #333;
+      padding: 24px;
+    }
+
+    h1 {
+      text-align: center;
+      margin-bottom: 24px;
+      font-size: 1.6rem;
+      color: #1a1a2e;
+    }
+
+    .container {
+      max-width: 820px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background: white;
+      border-radius: 8px;
+      padding: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+
+    .card h2 {
+      font-size: 1rem;
+      margin-bottom: 12px;
+      color: #444;
+    }
+
+    textarea {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      resize: vertical;
+      min-height: 110px;
+    }
+
+    button {
+      margin-top: 12px;
+      padding: 10px 24px;
+      background: #2563eb;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      background: #93b4f5;
+      cursor: not-allowed;
+    }
+
+    .error { color: #dc2626; margin-top: 10px; font-size: 0.9rem; }
+
+    .result-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .result-item { background: #f8faff; border-radius: 6px; padding: 12px; }
+    .result-item .label { font-size: 0.75rem; color: #888; margin-bottom: 4px; }
+    .result-item .value { font-size: 1rem; font-weight: bold; color: #1a1a2e; }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: 0.8rem;
+      font-weight: bold;
+    }
+    .badge-P0 { background: #fee2e2; color: #dc2626; }
+    .badge-P1 { background: #ffedd5; color: #ea580c; }
+    .badge-P2 { background: #fef9c3; color: #ca8a04; }
+    .badge-P3 { background: #dcfce7; color: #16a34a; }
+    .badge-urgent { background: #fce7f3; color: #db2777; }
+
+    .keywords { font-size: 0.85rem; color: #555; margin-top: 6px; }
+    .keywords span {
+      display: inline-block;
+      background: #e0e7ff;
+      color: #3730a3;
+      border-radius: 4px;
+      padding: 2px 8px;
+      margin: 2px;
+      font-size: 0.78rem;
+    }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    th { background: #f1f5f9; text-align: left; padding: 10px 12px; color: #555; }
+    td { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+
+    .hidden { display: none; }
+    #loading { text-align: center; color: #2563eb; margin-top: 10px; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h1>🎫 Support Ticket Triage</h1>
+
+  <!-- Submit Card -->
+  <div class="card">
+    <h2>Submit a Support Ticket</h2>
+    <textarea id="ticketInput" placeholder="Describe your issue here..."></textarea>
+    <br/>
+    <button id="submitBtn" onclick="submitTicket()">Analyze Ticket</button>
+    <div id="loading" class="hidden">Analyzing...</div>
+    <div id="error" class="error hidden"></div>
+  </div>
+
+  <!-- Result Card -->
+  <div class="card hidden" id="resultCard">
+    <h2>Analysis Result</h2>
+    <div class="result-grid">
+      <div class="result-item">
+        <div class="label">Category</div>
+        <div class="value" id="rCategory">-</div>
+      </div>
+      <div class="result-item">
+        <div class="label">Priority</div>
+        <div class="value" id="rPriority">-</div>
+      </div>
+      <div class="result-item">
+        <div class="label">Urgent</div>
+        <div class="value" id="rUrgent">-</div>
+      </div>
+      <div class="result-item">
+        <div class="label">Confidence</div>
+        <div class="value" id="rConfidence">-</div>
+      </div>
+    </div>
+    <div class="keywords" id="rKeywords" style="margin-top:14px;"></div>
+  </div>
+
+  <!-- Tickets List Card -->
+  <div class="card">
+    <h2>Previously Analyzed Tickets</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Message</th>
+          <th>Category</th>
+          <th>Priority</th>
+          <th>Urgent</th>
+          <th>Confidence</th>
+        </tr>
+      </thead>
+      <tbody id="ticketsList">
+        <tr><td colspan="5" style="color:#aaa;">No tickets yet.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+  const API = "http://localhost:5000";
+
+  async function submitTicket() {
+    const message = document.getElementById("ticketInput").value.trim();
+    const errEl = document.getElementById("error");
+    const loadEl = document.getElementById("loading");
+    const btn = document.getElementById("submitBtn");
+
+    errEl.classList.add("hidden");
+    if (!message) {
+      errEl.textContent = "Please enter a message.";
+      errEl.classList.remove("hidden");
+      return;
+    }
+
+    btn.disabled = true;
+    loadEl.classList.remove("hidden");
+
+    try {
+      const res = await fetch(`${API}/tickets/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message })
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        errEl.textContent = data.error || "Something went wrong.";
+        errEl.classList.remove("hidden");
+        return;
+      }
+
+      showResult(data);
+      loadTickets();
+      document.getElementById("ticketInput").value = "";
+    } catch (e) {
+      errEl.textContent = "Could not connect to server.";
+      errEl.classList.remove("hidden");
+    } finally {
+      btn.disabled = false;
+      loadEl.classList.add("hidden");
+    }
+  }
+
+  function showResult(data) {
+    document.getElementById("resultCard").classList.remove("hidden");
+    document.getElementById("rCategory").textContent = data.category;
+    document.getElementById("rPriority").innerHTML = `<span class="badge badge-${data.priority}">${data.priority}</span>`;
+    document.getElementById("rUrgent").innerHTML = data.isUrgent
+      ? `<span class="badge badge-urgent">Yes</span>`
+      : "No";
+    document.getElementById("rConfidence").textContent = (data.confidence * 100).toFixed(0) + "%";
+
+    const kwEl = document.getElementById("rKeywords");
+    if (data.keywords && data.keywords.length > 0) {
+      kwEl.innerHTML = "Keywords: " + data.keywords.map(k => `<span>${k}</span>`).join("");
+    } else {
+      kwEl.innerHTML = "No keywords detected.";
+    }
+  }
+
+  async function loadTickets() {
+    try {
+      const res = await fetch(`${API}/tickets`);
+      const tickets = await res.json();
+      const tbody = document.getElementById("ticketsList");
+
+      if (!tickets.length) {
+        tbody.innerHTML = `<tr><td colspan="5" style="color:#aaa;">No tickets yet.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = tickets.map(t => `
+        <tr>
+          <td style="max-width:280px;word-break:break-word;">${t.message.substring(0, 100)}${t.message.length > 100 ? "..." : ""}</td>
+          <td>${t.category}</td>
+          <td><span class="badge badge-${t.priority}">${t.priority}</span></td>
+          <td>${t.isUrgent ? "Yes" : "No"}</td>
+          <td>${(t.confidence * 100).toFixed(0)}%</td>
+        </tr>
+      `).join("");
+    } catch (e) {
+      console.error("Could not load tickets", e);
+    }
+  }
+
+  // Load tickets on page start
+  loadTickets();
+</script>
+</body>
+</html>
