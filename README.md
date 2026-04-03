@@ -126,65 +126,6 @@ This project is ready for deployment on:
 4. Connect to preferred deployment platform
 5. Deploy!
 
-## 📝 License
-
-MIT License
-
-## 👤 Author
-
-Created by Nikhil Negi Tech
-│   └── tests/
-│       └── analyzer.test.js
-├── frontend/
-│   └── public/
-│       └── index.html      # Single-page UI
-└── docker-compose.yml
-```
-
-**Separation of concerns:**
-- `routes/tickets.js` — controller layer (HTTP only)
-- `services/analyzer.js` — business logic (classification)
-- `config.js` — all keyword rules isolated in one place
-- `ticket.model.js` — database schema
-
----
-
-## Classification Logic
-
-All logic is local and keyword-based — no external APIs.
-
-1. **Category Classification** — The ticket message is lowercased and checked against keyword lists for each category (Billing, Technical, Account, Feature Request). The category with the most keyword matches wins.
-
-2. **Urgency Detection** — If the message contains words like "urgent", "asap", "down", "outage", etc., it is flagged as urgent.
-
-3. **Priority Assignment** — Priority (P0–P3) is assigned based on severity signals. P0 words like "outage" or "data loss" rank highest, down to P3 for low-priority suggestions.
-
-4. **Confidence Score** — Calculated as the ratio of matched keywords to total keywords in the matched category, capped at 1.0. Falls back to 0.3 for "Other".
-
-5. **Keyword Extraction** — All known keywords found in the message are returned as a list.
-
----
-
-## Custom Rule: Refund Escalation
-
-**Rule:** Any ticket mentioning "refund", "money back", "charge back", or "dispute" is automatically assigned **P1 (High)** priority, regardless of other signals.
-
-**Rationale:** Refund requests are time-sensitive and financially sensitive. Customers requesting refunds are often already frustrated. Delaying a refund response increases the risk of chargebacks, negative reviews, and customer churn. By automatically escalating these to P1, support teams can ensure they are handled quickly. This rule overrides lower severity scores like P2 or P3 that might otherwise apply to a standard billing inquiry.
-
----
-
-## Running Tests
-
-```bash
-cd backend
-npm install
-node tests/analyzer.test.js
-```
-
-Tests cover category classification, urgency detection, priority logic, the custom refund rule, and confidence scoring.
-
----
-
 ## Data Model
 
 Each ticket stored in MongoDB has:
