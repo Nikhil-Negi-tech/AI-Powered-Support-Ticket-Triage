@@ -4,6 +4,7 @@ An intelligent support ticket management system that uses AI to automatically an
 
 ## 🌐 Live Deployment
 
+- **Frontend**: https://ai-powered-support-ticket-triage.vercel.app/ (Deployed on Vercel)
 - **Backend API**: https://ai-powered-support-ticket-triage.onrender.com/ (Deployed on Render)
 
 ## 📋 Project Structure
@@ -32,7 +33,15 @@ AI-Powered-Support-Ticket-Triage/
 
 ## 🚀 Quick Start
 
-### Option 1: Docker Compose (Recommended - Local)
+### Option 1: Live Application (Recommended)
+
+Access the fully deployed application:
+- **Frontend**: https://ai-powered-support-ticket-triage.vercel.app/
+- **Backend API**: https://ai-powered-support-ticket-triage.onrender.com/
+
+Just visit the frontend URL and start analyzing tickets right away!
+
+### Option 2: Docker Compose (Local)
 
 ```bash
 cd "AI-Powered-Support-Ticket-Triage"
@@ -42,16 +51,6 @@ docker-compose up --build
 - **Frontend**: http://localhost:3000
 - **Backend API**: http://localhost:5000
 - **MongoDB**: mongodb://localhost:27017
-
-### Option 2: Using Deployed Backend
-
-To use the deployed backend on Render while running frontend locally:
-
-```bash
-# Update frontend to use the Render backend URL
-# Frontend: http://localhost:3000
-# Backend API**: https://ai-powered-support-ticket-triage.onrender.com/
-```
 
 ### Option 3: Local Development
 
