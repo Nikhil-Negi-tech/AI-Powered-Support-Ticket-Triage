@@ -2,6 +2,10 @@
 
 An intelligent support ticket management system that uses AI to automatically analyze and categorize support tickets, making ticket triage faster and more efficient.
 
+## 🌐 Live Deployment
+
+- **Backend API**: https://ai-powered-support-ticket-triage.onrender.com/ (Deployed on Render)
+
 ## 📋 Project Structure
 
 ```
@@ -28,7 +32,7 @@ AI-Powered-Support-Ticket-Triage/
 
 ## 🚀 Quick Start
 
-### Option 1: Docker Compose (Recommended)
+### Option 1: Docker Compose (Recommended - Local)
 
 ```bash
 cd "AI-Powered-Support-Ticket-Triage"
@@ -39,7 +43,17 @@ docker-compose up --build
 - **Backend API**: http://localhost:5000
 - **MongoDB**: mongodb://localhost:27017
 
-### Option 2: Local Development
+### Option 2: Using Deployed Backend
+
+To use the deployed backend on Render while running frontend locally:
+
+```bash
+# Update frontend to use the Render backend URL
+# Frontend: http://localhost:3000
+# Backend API**: https://ai-powered-support-ticket-triage.onrender.com/
+```
+
+### Option 3: Local Development
 
 #### Backend
 ```bash
