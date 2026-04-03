@@ -2,6 +2,11 @@
 
 An intelligent support ticket management system that uses AI to automatically analyze and categorize support tickets, making ticket triage faster and more efficient.
 
+## 📹 Project Explanation
+
+Watch the project demo and explanation:
+[![YouTube Video](https://img.shields.io/badge/YouTube-Watch%20Demo-red?style=for-the-badge&logo=youtube)](https://youtu.be/yRK6n4mvf1I)
+
 ## 🌐 Live Deployment
 
 - **Frontend**: https://ai-powered-support-ticket-triage.vercel.app/ (Deployed on Vercel)
