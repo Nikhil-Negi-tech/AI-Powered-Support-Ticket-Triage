@@ -1,0 +1,159 @@
+# sync_sharepoint_to_dashboard.py
+#
+# STAGE 2 of the pipeline:
+#   SharePoint list -> (this script) -> capacity_events table (Postgres)
+#   which main.py's Recent Events / KPI / Trend logic already reads.
+#
+# What it does:
+#   1. Reads rows from the SharePoint list where SyncedToDashboard = "No".
+#   2. Inserts one row per ticket into capacity_events, using source='TICKET'
+#      so the dashboard can distinguish these from MANUAL/CSV entries.
+#   3. Flips SyncedToDashboard to "Yes" on the SharePoint item so it's not
+#      re-processed next run.
+#
+# This can be run two ways:
+#   A) Standalone, on a schedule (cron / Task Scheduler), independent of
+#      the dashboard. Recommended for reliability.
+#   B) Imported into main.py and triggered by a "Sync Now" button or the
+#      existing dcc.Interval, for on-demand refreshes from the UI.
+#      See main.py's `sync_tickets_into_dashboard()` import at the top
+#      of the Events tab callback.
+#
+# Requirements:
+#   pip install requests msal sqlalchemy psycopg2-binary
+#
+# Uses the same DB_CONFIG as main.py/config.py, and the same
+# SHAREPOINT_CONFIG as sync_tickets_to_sharepoint.py (pipeline_config.py).
+
+import logging
+from datetime import datetime
+
+import requests
+import msal
+from sqlalchemy import create_engine, text
+
+from config import DB_CONFIG
+from pipeline_config import SHAREPOINT_CONFIG
+
+logging.basicConfig(
+    filename="sync_sharepoint_to_dashboard.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("dashboard_sync")
+
+ENGINE = create_engine(
+    f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}@"
+    f"{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}",
+    pool_pre_ping=True,
+)
+
+
+def get_graph_token():
+    app = msal.ConfidentialClientApplication(
+        SHAREPOINT_CONFIG["client_id"],
+        authority=f"https://login.microsoftonline.com/{SHAREPOINT_CONFIG['tenant_id']}",
+        client_credential=SHAREPOINT_CONFIG["client_secret"],
+    )
+    result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+    if "access_token" not in result:
+        raise RuntimeError(f"Graph auth failed: {result.get('error_description')}")
+    return result["access_token"]
+
+
+def get_pending_items(token):
+    """Rows where SyncedToDashboard = 'No'."""
+    site_id = SHAREPOINT_CONFIG["site_id"]
+    list_id = SHAREPOINT_CONFIG["list_id"]
+    url = (
+        f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items"
+        f"?expand=fields(select=TicketId,VMName,CPU,RAM,Storage,ClosedDate,SyncedToDashboard)"
+        f"&$top=200"
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    pending = []
+    while url:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        for item in data.get("value", []):
+            f = item.get("fields", {})
+            if f.get("SyncedToDashboard", "No") == "No":
+                pending.append({"item_id": item["id"], "fields": f})
+        url = data.get("@odata.nextLink")
+    return pending
+
+
+def mark_synced(token, item_id):
+    site_id = SHAREPOINT_CONFIG["site_id"]
+    list_id = SHAREPOINT_CONFIG["list_id"]
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items/{item_id}/fields"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    resp = requests.patch(url, headers=headers, json={"SyncedToDashboard": "Yes"}, timeout=30)
+    resp.raise_for_status()
+
+
+def insert_capacity_event(vm_name, cpu_cores, ram_gb, storage_gb, event_time):
+    """
+    Mirrors the insert logic in main.py's manual/CSV paths:
+    ram is stored in the DB as MB (column is misleadingly named ram_delta_gb,
+    kept consistent with the existing schema/convention).
+    """
+    ram_mb = float(ram_gb or 0) * 1024.0
+    with ENGINE.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO capacity_events
+            (assetuniquename, cpu_delta, ram_delta_gb, storage_delta_gb, source, event_time)
+            VALUES (:s, :c, :r, :st, 'TICKET', :ts)
+        """), {
+            "s": vm_name,
+            "c": float(cpu_cores or 0),
+            "r": ram_mb,
+            "st": float(storage_gb or 0),
+            "ts": event_time,
+        })
+
+
+def sync_tickets_into_dashboard():
+    """Entry point importable from main.py. Returns (created, failed) counts."""
+    token = get_graph_token()
+    pending = get_pending_items(token)
+    logger.info("Found %d pending SharePoint rows to sync", len(pending))
+
+    created, failed = 0, 0
+    for row in pending:
+        f = row["fields"]
+        try:
+            vm_name = f.get("VMName")
+            if not vm_name:
+                logger.warning("SharePoint item %s missing VMName, skipping", row["item_id"])
+                failed += 1
+                continue
+
+            closed_date = f.get("ClosedDate")
+            event_time = (
+                datetime.fromisoformat(closed_date.replace("Z", "+00:00"))
+                if closed_date else datetime.utcnow()
+            )
+
+            insert_capacity_event(
+                vm_name=vm_name,
+                cpu_cores=f.get("CPU"),
+                ram_gb=f.get("RAM"),
+                storage_gb=f.get("Storage"),
+                event_time=event_time,
+            )
+            mark_synced(token, row["item_id"])
+            created += 1
+            logger.info("Synced ticket %s (VM=%s) into capacity_events", f.get("TicketId"), vm_name)
+        except Exception:
+            logger.exception("Failed syncing SharePoint item %s", row["item_id"])
+            failed += 1
+
+    logger.info("Done. Created=%d Failed=%d", created, failed)
+    return created, failed
+
+
+if __name__ == "__main__":
+    c, f = sync_tickets_into_dashboard()
+    print(f"Created={c} Failed={f}")
