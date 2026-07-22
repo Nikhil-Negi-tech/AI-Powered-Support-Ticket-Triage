@@ -1,0 +1,288 @@
+# sync_tickets_to_sharepoint.py
+#
+# STAGE 1 of the pipeline:
+#   MS Forms -> Azure DevOps ticket -> (this script) -> SharePoint list
+#
+# What it does:
+#   1. Queries Azure DevOps (via WIQL) for CLOSED work items of a given type
+#      (e.g. "Hardware Request") in a given project/area.
+#   2. For each ticket, fetches all comments and takes the LAST one
+#      (the one the engineer wrote when they closed the ticket, describing
+#      the VM/server that was actually provisioned).
+#   3. Parses that comment for VM Name, CPU, RAM, Storage using flexible
+#      regex patterns (so small wording differences in the comment don't
+#      break parsing).
+#   4. Writes one row per ticket into a SharePoint list, skipping tickets
+#      that are already present (dedup by Azure DevOps ticket ID).
+#
+# Run this on a schedule: Windows Task Scheduler, cron, or an Azure
+# Function/Logic App timer trigger. Every 15-30 minutes is reasonable.
+#
+# Requirements:
+#   pip install requests msal
+#
+# Config needed (put these in pipeline_config.py, see bottom of file
+# for the expected shape):
+#   AZURE_DEVOPS_CONFIG = {
+#       "org": "your-org",
+#       "project": "your-project",
+#       "pat": "xxxxx",                     # Personal Access Token, scope: Work Items (Read)
+#       "work_item_type": "Hardware Request", # or use a Tag instead, see WIQL below
+#       "area_path": None                    # optional, e.g. "YourProject\\IT\\Requests"
+#   }
+#   SHAREPOINT_CONFIG = {
+#       "tenant_id": "xxxx",
+#       "client_id": "xxxx",
+#       "client_secret": "xxxx",             # app registration w/ Sites.ReadWrite.All
+#       "site_id": "xxxx",                   # Graph site id, see get_site_id() helper below
+#       "list_id": "xxxx",                   # Graph list id (the "HardwareRequests" list)
+#   }
+
+import re
+import base64
+import logging
+from datetime import datetime, timezone
+
+import requests
+import msal
+
+from pipeline_config import AZURE_DEVOPS_CONFIG, SHAREPOINT_CONFIG
+
+logging.basicConfig(
+    filename="sync_tickets_to_sharepoint.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("ticket_sync")
+
+# ---------------- Azure DevOps helpers ----------------
+
+def _ado_auth_header():
+    token = base64.b64encode(f":{AZURE_DEVOPS_CONFIG['pat']}".encode()).decode()
+    return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
+
+
+def get_closed_hardware_tickets():
+    """Returns list of {id, title, closed_date} for closed Hardware Request work items."""
+    org = AZURE_DEVOPS_CONFIG["org"]
+    project = AZURE_DEVOPS_CONFIG["project"]
+    wit = AZURE_DEVOPS_CONFIG["work_item_type"]
+
+    wiql_conditions = [
+        f"[System.TeamProject] = '{project}'",
+        f"[System.WorkItemType] = '{wit}'",
+        "[System.State] IN ('Closed', 'Done', 'Resolved')",
+    ]
+    if AZURE_DEVOPS_CONFIG.get("area_path"):
+        wiql_conditions.append(f"[System.AreaPath] = '{AZURE_DEVOPS_CONFIG['area_path']}'")
+
+    wiql = {
+        "query": f"""
+            SELECT [System.Id], [System.Title], [System.ChangedDate]
+            FROM WorkItems
+            WHERE {' AND '.join(wiql_conditions)}
+            ORDER BY [System.ChangedDate] DESC
+        """
+    }
+
+    url = f"https://dev.azure.com/{org}/{project}/_apis/wit/wiql?api-version=7.1"
+    resp = requests.post(url, headers=_ado_auth_header(), json=wiql, timeout=30)
+    resp.raise_for_status()
+    work_items = resp.json().get("workItems", [])
+    return [{"id": wi["id"]} for wi in work_items]
+
+
+def get_last_comment(work_item_id):
+    """Fetch comments for a work item, return text of the most recent one."""
+    org = AZURE_DEVOPS_CONFIG["org"]
+    project = AZURE_DEVOPS_CONFIG["project"]
+    url = (
+        f"https://dev.azure.com/{org}/{project}/_apis/wit/workItems/"
+        f"{work_item_id}/comments?api-version=7.1-preview.3"
+    )
+    resp = requests.get(url, headers=_ado_auth_header(), timeout=30)
+    resp.raise_for_status()
+    comments = resp.json().get("comments", [])
+    if not comments:
+        return None, None
+    # Comments come back ordered; sort explicitly by createdDate to be safe
+    comments.sort(key=lambda c: c.get("createdDate", ""))
+    last = comments[-1]
+    return last.get("text", ""), last.get("createdDate")
+
+
+def get_work_item_title(work_item_id):
+    org = AZURE_DEVOPS_CONFIG["org"]
+    url = f"https://dev.azure.com/{org}/_apis/wit/workitems/{work_item_id}?api-version=7.1"
+    resp = requests.get(url, headers=_ado_auth_header(), timeout=30)
+    resp.raise_for_status()
+    return resp.json().get("fields", {}).get("System.Title", "")
+
+
+# ---------------- Comment parsing ----------------
+# Deliberately tolerant: matches "VM Name:", "Server Name:", "Hostname:" etc,
+# with optional units, HTML tags stripped (ADO comments are HTML), and
+# either newline or "|"-separated fields.
+
+def _strip_html(text):
+    if not text:
+        return ""
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"&nbsp;", " ", text)
+    return text.strip()
+
+
+FIELD_PATTERNS = {
+    "vm_name": r"(?:vm\s*name|server\s*name|hostname|host\s*name)\s*[:\-]\s*([A-Za-z0-9_\-\.]+)",
+    "cpu": r"(?:cpu|vcpu|cores?)\s*[:\-]\s*([\d.]+)",
+    "ram": r"(?:ram|memory)\s*[:\-]\s*([\d.]+)\s*(gb|tb|mb)?",
+    "storage": r"(?:storage|disk)\s*[:\-]\s*([\d.]+)\s*(gb|tb|mb)?",
+}
+
+
+def parse_ticket_comment(raw_comment):
+    """
+    Parse a closing comment into structured fields.
+    Returns dict with keys: vm_name, cpu_cores, ram_gb, storage_gb
+    Any field that can't be found is returned as None so the caller can
+    decide whether to skip the ticket or flag it for manual review.
+    """
+    text = _strip_html(raw_comment).lower()
+
+    result = {"vm_name": None, "cpu_cores": None, "ram_gb": None, "storage_gb": None}
+
+    m = re.search(FIELD_PATTERNS["vm_name"], text, re.IGNORECASE)
+    if m:
+        result["vm_name"] = m.group(1)
+
+    m = re.search(FIELD_PATTERNS["cpu"], text, re.IGNORECASE)
+    if m:
+        result["cpu_cores"] = float(m.group(1))
+
+    m = re.search(FIELD_PATTERNS["ram"], text, re.IGNORECASE)
+    if m:
+        val = float(m.group(1))
+        unit = (m.group(2) or "gb").lower()
+        if unit == "tb":
+            val *= 1024
+        elif unit == "mb":
+            val /= 1024
+        result["ram_gb"] = val
+
+    m = re.search(FIELD_PATTERNS["storage"], text, re.IGNORECASE)
+    if m:
+        val = float(m.group(1))
+        unit = (m.group(2) or "gb").lower()
+        if unit == "tb":
+            val *= 1024
+        elif unit == "mb":
+            val /= 1024
+        result["storage_gb"] = val
+
+    return result
+
+
+# ---------------- SharePoint (Microsoft Graph) helpers ----------------
+
+def get_graph_token():
+    app = msal.ConfidentialClientApplication(
+        SHAREPOINT_CONFIG["client_id"],
+        authority=f"https://login.microsoftonline.com/{SHAREPOINT_CONFIG['tenant_id']}",
+        client_credential=SHAREPOINT_CONFIG["client_secret"],
+    )
+    result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+    if "access_token" not in result:
+        raise RuntimeError(f"Graph auth failed: {result.get('error_description')}")
+    return result["access_token"]
+
+
+def get_existing_ticket_ids(token):
+    """Pull all TicketId values already present in the SharePoint list (for dedup)."""
+    site_id = SHAREPOINT_CONFIG["site_id"]
+    list_id = SHAREPOINT_CONFIG["list_id"]
+    url = (
+        f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items"
+        f"?expand=fields(select=TicketId)&$top=200"
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    existing = set()
+    while url:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        for item in data.get("value", []):
+            tid = item.get("fields", {}).get("TicketId")
+            if tid is not None:
+                existing.add(int(tid))
+        url = data.get("@odata.nextLink")
+    return existing
+
+
+def add_sharepoint_item(token, fields):
+    site_id = SHAREPOINT_CONFIG["site_id"]
+    list_id = SHAREPOINT_CONFIG["list_id"]
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    resp = requests.post(url, headers=headers, json={"fields": fields}, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ---------------- Main run ----------------
+
+def run():
+    logger.info("Starting ticket -> SharePoint sync")
+    token = get_graph_token()
+    existing_ids = get_existing_ticket_ids(token)
+    logger.info("Found %d tickets already in SharePoint list", len(existing_ids))
+
+    tickets = get_closed_hardware_tickets()
+    logger.info("Found %d closed hardware-request tickets in Azure DevOps", len(tickets))
+
+    created, skipped, failed = 0, 0, 0
+
+    for t in tickets:
+        tid = t["id"]
+        if tid in existing_ids:
+            skipped += 1
+            continue
+        try:
+            comment_text, comment_date = get_last_comment(tid)
+            if not comment_text:
+                logger.warning("Ticket %s has no comments, skipping", tid)
+                failed += 1
+                continue
+
+            parsed = parse_ticket_comment(comment_text)
+            if not parsed["vm_name"]:
+                logger.warning("Ticket %s: could not parse VM name from comment, skipping", tid)
+                failed += 1
+                continue
+
+            title = get_work_item_title(tid)
+
+            fields = {
+                "Title": title or f"Ticket {tid}",
+                "TicketId": tid,
+                "VMName": parsed["vm_name"],
+                "CPU": parsed["cpu_cores"] if parsed["cpu_cores"] is not None else 0,
+                "RAM": parsed["ram_gb"] if parsed["ram_gb"] is not None else 0,
+                "Storage": parsed["storage_gb"] if parsed["storage_gb"] is not None else 0,
+                "ClosedDate": comment_date or datetime.now(timezone.utc).isoformat(),
+                "SyncedToDashboard": "No",
+                "RawComment": _strip_html(comment_text)[:2000],  # truncate for list column limits
+            }
+            add_sharepoint_item(token, fields)
+            created += 1
+            logger.info("Ticket %s -> SharePoint OK (VM=%s)", tid, parsed["vm_name"])
+        except Exception:
+            logger.exception("Failed processing ticket %s", tid)
+            failed += 1
+
+    logger.info("Done. Created=%d Skipped(existing)=%d Failed=%d", created, skipped, failed)
+    print(f"Created={created} Skipped={skipped} Failed={failed}")
+
+
+if __name__ == "__main__":
+    run()
