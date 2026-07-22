@@ -1,0 +1,23 @@
+# SharePoint list: "HardwareRequests"
+
+Create a custom list with these columns (internal names matter — Graph API uses them):
+
+| Column name        | Type            | Notes                                      |
+|---------------------|-----------------|---------------------------------------------|
+| Title                | Single line text| Ticket title (default column, keep it)     |
+| TicketId             | Number          | Azure DevOps work item ID — used for dedup  |
+| VMName               | Single line text| Parsed server/VM name                       |
+| CPU                  | Number           | Cores                                        |
+| RAM                  | Number           | GB                                           |
+| Storage              | Number           | GB                                           |
+| ClosedDate           | Single line text| ISO timestamp of the closing comment         |
+| SyncedToDashboard    | Choice (Yes/No)  | Default "No" — flips to "Yes" after Script 2 |
+| RawComment           | Multiple lines of text | Original comment, for audit/debug       |
+
+Tips:
+- Set `SyncedToDashboard` default value to "No" so new items are picked up automatically.
+- Keep `TicketId` indexed if the list grows large (List settings → Indexed columns) —
+  makes the dedup lookup in Script 1 faster.
+- Give the app registration used by both scripts **Sites.ReadWrite.All** (application
+  permission, admin consent) on Microsoft Graph, or scope it down to just this site
+  with a site-specific app permission if your tenant policy requires that.
