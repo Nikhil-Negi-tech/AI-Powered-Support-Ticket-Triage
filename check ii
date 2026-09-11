@@ -1,549 +1,211 @@
 "use client";
 
 import * as React from "react";
+import { useFormContext, useWatch } from "react-hook-form";
+import { History, MessageSquare, Send, ListChecks } from "lucide-react";
 import {
-  Bold,
-  Columns3,
-  Heading2,
-  Italic,
-  Link2,
-  List,
-  ListOrdered,
-  Quote,
-  RemoveFormatting,
-  Rows3,
-  Table2,
-  Trash2,
-  Underline as UnderlineIcon,
-} from "lucide-react";
-import { EditorContent, ReactRenderer, useEditor } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
-import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
-import Link from "@tiptap/extension-link";
-import Underline from "@tiptap/extension-underline";
-import CharacterCount from "@tiptap/extension-character-count";
-import Mention from "@tiptap/extension-mention";
-import type {
-  SuggestionKeyDownProps,
-  SuggestionOptions,
-} from "@tiptap/suggestion";
-import type { Editor, JSONContent } from "@tiptap/core";
-import type { EditorView } from "@tiptap/pm/view";
-import { parseSpreadsheetClipboard } from "@/lib/spreadsheet-paste";
-import { cn } from "@/lib/utils";
+  Card,
+  CardContent,
+} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Avatar } from "@/components/ui/avatar";
+import {
+  RichTextEditor,
+} from "@/components/ui/rich-text-editor";
+import { MentionText } from "@/components/ui/textarea";
+import { cn, formatDateTime } from "@/lib/utils";
+import { CURRENT_USER, SAMPLE_HISTORY } from "@/lib/mock-data";
+import type { Approver } from "@/lib/types";
 
-interface RichTextEditorProps {
-  value: string;
-  onChange: (html: string, text: string) => void;
-  onBlur?: () => void;
-  placeholder?: string;
-  ariaLabel: string;
-  invalid?: boolean;
-  maxLength?: number;
-  compact?: boolean;
-  mentionSearchUrl?: string;
-}
+type TabKey = "comments" | "history" | "details";
 
-interface RichTextContentProps {
-  value: string;
-  className?: string;
-}
-
-interface ToolbarButtonProps {
-  label: string;
-  onClick: () => void;
-  active?: boolean;
-  disabled?: boolean;
-  children: React.ReactNode;
-}
-
-function ToolbarButton({
-  label,
-  onClick,
-  active,
-  disabled,
-  children,
-}: ToolbarButtonProps) {
-  return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      aria-pressed={active || undefined}
-      disabled={disabled}
-      onMouseDown={(event) => event.preventDefault()}
-      onClick={onClick}
-      className={cn(
-        "flex h-8 w-8 shrink-0 items-center justify-center rounded border border-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40",
-        active && "border-border bg-muted text-foreground"
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-interface MentionUser {
+interface Comment {
   id: string;
-  name: string;
-  label?: string;
-  email: string;
-  department?: string;
-  profilePhotoUrl?: string;
+  author: string;
+  body: string;
+  plainText: string;
+  at: Date;
 }
 
-interface MentionListProps {
-  items: MentionUser[];
-  command: (item: MentionUser) => void;
-}
+const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
+  { key: "comments", label: "Comments", icon: <MessageSquare className="h-4 w-4" /> },
+  { key: "history", label: "History", icon: <History className="h-4 w-4" /> },
+  { key: "details", label: "Details", icon: <ListChecks className="h-4 w-4" /> },
+];
 
-const MentionList = React.forwardRef<
-  { onKeyDown: (props: SuggestionKeyDownProps) => boolean },
-  MentionListProps
->(({ items, command }, ref) => {
-  const [selectedIndex, setSelectedIndex] = React.useState(0);
+export function ActivityTabs() {
+  const [tab, setTab] = React.useState<TabKey>("comments");
+  const [comments, setComments] = React.useState<Comment[]>([]);
+  const [draft, setDraft] = React.useState("");
+  const [draftPlainText, setDraftPlainText] = React.useState("");
 
-  React.useEffect(() => setSelectedIndex(0), [items]);
-
-  const selectItem = (index: number) => {
-    const item = items[index];
-    if (item) command({ ...item, label: item.label ?? item.name });
-  };
-
-  React.useImperativeHandle(ref, () => ({
-    onKeyDown: ({ event }) => {
-      if (!items.length) return false;
-      if (event.key === "ArrowUp") {
-        setSelectedIndex((index) => (index + items.length - 1) % items.length);
-        return true;
-      }
-      if (event.key === "ArrowDown") {
-        setSelectedIndex((index) => (index + 1) % items.length);
-        return true;
-      }
-      if (event.key === "Enter") {
-        selectItem(selectedIndex);
-        return true;
-      }
-      return false;
-    },
-  }));
-
-  if (!items.length) return null;
-
-  return (
-    <div className="w-72 overflow-hidden rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-lg">
-      {items.map((item, index) => (
-        <button
-          key={item.id}
-          type="button"
-          className={cn(
-            "block w-full rounded px-3 py-2 text-left text-sm",
-            index === selectedIndex ? "bg-accent" : "hover:bg-muted"
-          )}
-          onMouseDown={(event) => {
-            event.preventDefault();
-            selectItem(index);
-          }}
-        >
-          <span className="block font-medium">{item.name}</span>
-          <span className="block truncate text-xs text-muted-foreground">
-            {item.email}
-          </span>
-        </button>
-      ))}
-    </div>
-  );
-});
-
-MentionList.displayName = "MentionList";
-
-function positionMentionPopup(popup: HTMLDivElement, rect: DOMRect) {
-  popup.style.left = `${rect.left}px`;
-  popup.style.top = `${rect.bottom + 6}px`;
-}
-
-function createMentionSuggestion(
-  searchUrl: string
-): Omit<SuggestionOptions<MentionUser>, "editor"> {
-  return {
-    char: "@",
-    allowSpaces: true,
-    items: async ({ query }) => {
-      if (query.trim().length < 2) return [];
-      try {
-        const response = await fetch(
-          `${searchUrl}?q=${encodeURIComponent(query.trim())}`
-        );
-        if (!response.ok) {
-          console.error(`Mention search failed (${response.status})`, searchUrl);
-          return [];
-        }
-        const data = (await response.json()) as { users?: MentionUser[] };
-        return (data.users ?? []).map((user) => ({
-          ...user,
-          label: user.label ?? user.name,
-        }));
-      } catch {
-        console.error("Mention search request failed", searchUrl);
-        return [];
-      }
-    },
-    render: () => {
-      let renderer: ReactRenderer<{
-        onKeyDown: (props: SuggestionKeyDownProps) => boolean;
-      }>;
-      let popup: HTMLDivElement;
-
-      return {
-        onStart: (props) => {
-          renderer = new ReactRenderer(MentionList, {
-            props,
-            editor: props.editor,
-          });
-          popup = document.createElement("div");
-          popup.style.position = "fixed";
-          popup.style.zIndex = "50";
-          document.body.appendChild(popup);
-          popup.appendChild(renderer.element);
-          const rect = props.clientRect?.();
-          if (rect) positionMentionPopup(popup, rect);
-        },
-        onUpdate: (props) => {
-          renderer.updateProps(props);
-          const rect = props.clientRect?.();
-          if (rect) positionMentionPopup(popup, rect);
-        },
-        onKeyDown: (props) => {
-          if (props.event.key === "Escape") {
-            popup?.remove();
-            return true;
-          }
-          return renderer?.ref?.onKeyDown(props) ?? false;
-        },
-        onExit: () => {
-          popup?.remove();
-          renderer?.destroy();
-        },
-      };
-    },
-  };
-}
-
-function createRichTextExtensions(
-  maxLength: number | null = null,
-  mentionSearchUrl?: string
-) {
-  return [
-    StarterKit.configure({
-      link: false,
-      underline: false,
-      heading: { levels: [2] },
-    }),
-    Link.configure({ openOnClick: false, autolink: true }),
-    Underline,
-    Table.configure({ resizable: true, lastColumnResizable: false }),
-    TableRow,
-    TableHeader,
-    TableCell,
-    CharacterCount.configure({ limit: maxLength }),
-    Mention.configure({
-      HTMLAttributes: {
-        class: "mention rounded px-1 font-semibold",
-        style:
-          "background-color: rgba(34, 211, 238, 0.22); color: rgb(14, 116, 144); padding-left: 0.25rem; padding-right: 0.25rem; border-radius: 0.25rem; font-weight: 600;",
+  // Live audit trail of approver status/comments for the History timeline.
+  const { control } = useFormContext();
+  const approvers =
+    (useWatch({ control, name: "approvers" }) as Approver[] | undefined) ?? [];
+  const approverAudit = approvers.flatMap((approver) => {
+    const entries: { id: string; actor: string; action: string }[] = [
+      {
+        id: `${approver.id}-status`,
+        actor: approver.name,
+        action: `was added as an approver.`,
       },
-      suggestion: mentionSearchUrl
-        ? createMentionSuggestion(mentionSearchUrl)
-        : undefined,
-    }),
-  ];
-}
-
-function RichTextSurface({
-  children,
-  className,
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div
-      className={cn(
-        "relative",
-        "[&_.tiptap_p]:my-1 [&_.tiptap_h2]:my-2 [&_.tiptap_h2]:text-xl [&_.tiptap_h2]:font-semibold",
-        "[&_.tiptap_ul]:my-2 [&_.tiptap_ul]:list-disc [&_.tiptap_ul]:pl-6 [&_.tiptap_ol]:my-2 [&_.tiptap_ol]:list-decimal [&_.tiptap_ol]:pl-6",
-        "[&_.tiptap_blockquote]:my-2 [&_.tiptap_blockquote]:border-l-4 [&_.tiptap_blockquote]:border-border [&_.tiptap_blockquote]:pl-3 [&_.tiptap_blockquote]:text-muted-foreground",
-        "[&_.tiptap_a]:text-primary [&_.tiptap_a]:underline",
-        "[&_.tableWrapper]:my-2 [&_.tableWrapper]:overflow-x-auto [&_.tiptap_table]:w-full [&_.tiptap_table]:border-collapse",
-        "[&_.tiptap_th]:min-w-32 [&_.tiptap_th]:border [&_.tiptap_th]:border-border [&_.tiptap_th]:bg-muted [&_.tiptap_th]:px-3 [&_.tiptap_th]:py-2 [&_.tiptap_th]:text-left [&_.tiptap_th]:font-semibold",
-        "[&_.tiptap_td]:min-w-32 [&_.tiptap_td]:border [&_.tiptap_td]:border-border [&_.tiptap_td]:px-3 [&_.tiptap_td]:py-2 [&_.tiptap_td]:align-top",
-        "[&_.selectedCell]:bg-primary/10",
-        className
-      )}
-    >
-      {children}
-    </div>
-  );
-}
-
-function spreadsheetTableContent(rows: string[][]): JSONContent {
-  return {
-    type: "table",
-    content: rows.map((row, rowIndex) => ({
-      type: "tableRow",
-      content: row.map((cell) => ({
-        type: rowIndex === 0 ? "tableHeader" : "tableCell",
-        content: cell.split("\n").map((line) => ({
-          type: "paragraph",
-          content: line ? [{ type: "text", text: line }] : undefined,
-        })),
-      })),
-    })),
-  };
-}
-
-function insertSpreadsheetTable(
-  view: EditorView,
-  event: ClipboardEvent
-): boolean {
-  const rows = parseSpreadsheetClipboard(
-    event.clipboardData?.getData("text/plain") ?? ""
-  );
-  if (!rows) return false;
-
-  event.preventDefault();
-  const table = view.state.schema.nodeFromJSON(spreadsheetTableContent(rows));
-  view.dispatch(
-    view.state.tr.replaceSelectionWith(table).scrollIntoView()
-  );
-  return true;
-}
-
-function setLink(editor: Editor) {
-  const currentUrl = editor.getAttributes("link").href as string | undefined;
-  const url = window.prompt("Enter a URL", currentUrl ?? "https://");
-
-  if (url === null) return;
-  if (!url.trim()) {
-    editor.chain().focus().extendMarkRange("link").unsetLink().run();
-    return;
-  }
-
-  editor
-    .chain()
-    .focus()
-    .extendMarkRange("link")
-    .setLink({ href: url.trim() })
-    .run();
-}
-
-export function RichTextEditor({
-  value,
-  onChange,
-  onBlur,
-  placeholder,
-  ariaLabel,
-  invalid,
-  maxLength,
-  compact = false,
-  mentionSearchUrl = "/api/users/search",
-}: RichTextEditorProps) {
-  const editor = useEditor({
-    extensions: createRichTextExtensions(maxLength ?? null, mentionSearchUrl),
-    content: value,
-    immediatelyRender: false,
-    editorProps: {
-      attributes: {
-        "aria-label": ariaLabel,
-        class: cn(
-          "tiptap px-4 py-3 text-sm text-foreground outline-none",
-          compact ? "min-h-32" : "min-h-56"
-        ),
-      },
-      handlePaste: insertSpreadsheetTable,
-    },
-    onUpdate: ({ editor: currentEditor }) => {
-      onChange(
-        currentEditor.isEmpty ? "" : currentEditor.getHTML(),
-        currentEditor.isEmpty
-          ? ""
-          : currentEditor.getText({ blockSeparator: "\n" })
-      );
-    },
-    onBlur,
+    ];
+    if (approver.comment?.trim()) {
+      entries.push({
+        id: `${approver.id}-comment`,
+        actor: approver.name,
+        action: `added an approval comment.`,
+      });
+    }
+    return entries;
   });
 
-  React.useEffect(() => {
-    if (!editor) return;
-    const currentValue = editor.isEmpty ? "" : editor.getHTML();
-    if (currentValue !== value) {
-      editor.commands.setContent(value, { emitUpdate: false });
-    }
-  }, [editor, value]);
-
-  const characterCount = editor?.storage.characterCount.characters() ?? 0;
-  const inTable = editor?.isActive("table") ?? false;
+  const addComment = () => {
+    const body = draft.trim();
+    const plainText = draftPlainText.trim();
+    if (!body) return;
+    setComments((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        author: CURRENT_USER.name,
+        body,
+        plainText: plainText || body,
+        at: new Date(),
+      },
+    ]);
+    setDraft("");
+    setDraftPlainText("");
+  };
 
   return (
-    <div
-      className={cn(
-        "overflow-hidden rounded-md border border-input bg-card shadow-sm transition-colors focus-within:ring-2 focus-within:ring-ring",
-        invalid && "border-destructive focus-within:ring-destructive"
-      )}
-    >
-      <div className="flex min-h-11 flex-wrap items-center gap-1 border-b border-border bg-muted/30 px-2 py-1.5">
-        <ToolbarButton
-          label="Bold"
-          active={editor?.isActive("bold")}
-          disabled={!editor}
-          onClick={() => editor?.chain().focus().toggleBold().run()}
-        >
-          <Bold className="h-4 w-4" />
-        </ToolbarButton>
-        <ToolbarButton
-          label="Italic"
-          active={editor?.isActive("italic")}
-          disabled={!editor}
-          onClick={() => editor?.chain().focus().toggleItalic().run()}
-        >
-          <Italic className="h-4 w-4" />
-        </ToolbarButton>
-        <ToolbarButton
-          label="Underline"
-          active={editor?.isActive("underline")}
-          disabled={!editor}
-          onClick={() => editor?.chain().focus().toggleUnderline().run()}
-        >
-          <UnderlineIcon className="h-4 w-4" />
-        </ToolbarButton>
-        <span className="mx-1 h-6 w-px bg-border" />
-        <ToolbarButton
-          label="Bullet list"
-          active={editor?.isActive("bulletList")}
-          disabled={!editor}
-          onClick={() => editor?.chain().focus().toggleBulletList().run()}
-        >
-          <List className="h-4 w-4" />
-        </ToolbarButton>
-        <ToolbarButton
-          label="Numbered list"
-          active={editor?.isActive("orderedList")}
-          disabled={!editor}
-          onClick={() => editor?.chain().focus().toggleOrderedList().run()}
-        >
-          <ListOrdered className="h-4 w-4" />
-        </ToolbarButton>
-        <ToolbarButton
-          label="Block quote"
-          active={editor?.isActive("blockquote")}
-          disabled={!editor}
-          onClick={() => editor?.chain().focus().toggleBlockquote().run()}
-        >
-          <Quote className="h-4 w-4" />
-        </ToolbarButton>
-        <ToolbarButton
-          label="Heading"
-          active={editor?.isActive("heading", { level: 2 })}
-          disabled={!editor}
-          onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}
-        >
-          <Heading2 className="h-4 w-4" />
-        </ToolbarButton>
-        <ToolbarButton
-          label="Link"
-          active={editor?.isActive("link")}
-          disabled={!editor}
-          onClick={() => editor && setLink(editor)}
-        >
-          <Link2 className="h-4 w-4" />
-        </ToolbarButton>
-        <ToolbarButton
-          label="Insert table"
-          active={inTable}
-          disabled={!editor}
-          onClick={() =>
-            editor
-              ?.chain()
-              .focus()
-              .insertTable({ rows: 3, cols: 3, withHeaderRow: true })
-              .run()
-          }
-        >
-          <Table2 className="h-4 w-4" />
-        </ToolbarButton>
-        <ToolbarButton
-          label="Clear formatting"
-          disabled={!editor}
-          onClick={() => editor?.chain().focus().unsetAllMarks().clearNodes().run()}
-        >
-          <RemoveFormatting className="h-4 w-4" />
-        </ToolbarButton>
-
-        {inTable && (
-          <>
-            <span className="mx-1 h-6 w-px bg-border" />
-            <ToolbarButton
-              label="Add row below"
-              onClick={() => editor?.chain().focus().addRowAfter().run()}
-            >
-              <Rows3 className="h-4 w-4" />
-            </ToolbarButton>
-            <ToolbarButton
-              label="Add column after"
-              onClick={() => editor?.chain().focus().addColumnAfter().run()}
-            >
-              <Columns3 className="h-4 w-4" />
-            </ToolbarButton>
-            <ToolbarButton
-              label="Delete table"
-              onClick={() => editor?.chain().focus().deleteTable().run()}
-            >
-              <Trash2 className="h-4 w-4" />
-            </ToolbarButton>
-          </>
-        )}
-
-        {maxLength !== undefined && (
-          <span className="ml-auto px-1 text-xs text-muted-foreground">
-            {characterCount}/{maxLength}
-          </span>
-        )}
+    <Card>
+      <div
+        role="tablist"
+        aria-label="Activity"
+        className="flex border-b border-border px-2"
+      >
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            role="tab"
+            aria-selected={tab === t.key}
+            onClick={() => setTab(t.key)}
+            className={cn(
+              "flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              tab === t.key
+                ? "border-primary text-primary"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {t.icon}
+            {t.label}
+          </button>
+        ))}
       </div>
 
-      <RichTextSurface>
-        {!editor?.isFocused && editor?.isEmpty && placeholder && (
-          <span className="pointer-events-none absolute left-4 top-3 text-sm text-muted-foreground">
-            {placeholder}
-          </span>
+      <CardContent className="pt-4">
+        {tab === "comments" && (
+          <div className="space-y-4">
+            <div className="flex gap-3">
+              <Avatar name={CURRENT_USER.name} size="md" />
+              <div className="flex-1">
+                <RichTextEditor
+                  value={draft}
+                  onChange={(html, text) => {
+                    setDraft(html);
+                    setDraftPlainText(text);
+                  }}
+                  ariaLabel="Comment"
+                  maxLength={5000}
+                  compact
+                  placeholder="Add a comment for the support team..."
+                />
+                <div className="mt-2 flex justify-end">
+                  <Button size="sm" onClick={addComment} disabled={!draft.trim()}>
+                    <Send className="h-4 w-4" />
+                    Add Comment
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            {comments.length === 0 ? (
+              <p className="py-4 text-center text-sm text-muted-foreground">
+                No comments yet. Comments are stored locally for this session
+                only.
+              </p>
+            ) : (
+              <ul className="space-y-3">
+                {comments.map((c) => (
+                  <li key={c.id} className="flex gap-3">
+                    <Avatar name={c.author} size="md" />
+                    <div className="flex-1 rounded-md border border-border bg-muted/40 px-3 py-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-semibold text-foreground">
+                          {c.author}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {formatDateTime(c.at)}
+                        </span>
+                      </div>
+                      <MentionText
+                        text={c.plainText}
+                        className="mt-1 block text-sm leading-6"
+                      />
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
-        <EditorContent editor={editor} />
-      </RichTextSurface>
-    </div>
-  );
-}
 
-export function RichTextContent({ value, className }: RichTextContentProps) {
-  const editor = useEditor({
-    extensions: createRichTextExtensions(),
-    content: value,
-    editable: false,
-    immediatelyRender: false,
-    editorProps: {
-      attributes: {
-        class: "tiptap text-sm text-foreground outline-none",
-      },
-    },
-  });
+        {tab === "history" && (
+          <ol className="relative space-y-4 border-l border-border pl-5">
+            {SAMPLE_HISTORY.map((h) => (
+              <li key={h.id} className="relative">
+                <span className="absolute -left-[23px] top-1 h-2.5 w-2.5 rounded-full border-2 border-card bg-primary" />
+                <p className="text-sm text-foreground">
+                  <span className="font-semibold">{h.actor}</span> {h.action}
+                </p>
+                <p className="text-xs text-muted-foreground">{h.timestamp}</p>
+              </li>
+            ))}
+            {approverAudit.map((entry) => (
+              <li key={entry.id} className="relative">
+                <span className="absolute -left-[23px] top-1 h-2.5 w-2.5 rounded-full border-2 border-card bg-primary" />
+                <div>
+                  <p className="text-sm text-foreground">
+                    <span className="font-semibold">{entry.actor}</span>{" "}
+                    {entry.action}
+                  </p>
 
-  React.useEffect(() => {
-    if (!editor || editor.getHTML() === value) return;
-    editor.commands.setContent(value, { emitUpdate: false });
-  }, [editor, value]);
+                  {entry.action === "added an approval comment." &&
+                    approvers.find((a) => a.id === entry.id.replace("-comment", ""))?.comment && (
+                      <p className="mt-1 text-xs italic text-muted-foreground">
+                        "
+                        {approvers.find(
+                          (a) => a.id === entry.id.replace("-comment", "")
+                        )?.comment}
+                        "
+                      </p>
+                    )}
+                </div>
+                <p className="text-xs text-muted-foreground">Just now</p>
+              </li>
+            ))}
+          </ol>
+        )}
 
-  return (
-    <RichTextSurface className={className}>
-      <EditorContent editor={editor} />
-    </RichTextSurface>
+        {tab === "details" && (
+          <p className="py-4 text-center text-sm text-muted-foreground">
+            Additional system details will appear here once the request has been
+            submitted.
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
