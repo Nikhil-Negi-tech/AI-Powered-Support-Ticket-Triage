@@ -164,7 +164,7 @@ Textarea.displayName = "Textarea";
 export { Textarea };
 
 export function MentionText({ text, className }: { text: string; className?: string }) {
-  const parts = text.split(/(@[^\s<]+(?:\s+[A-Z][a-z'-]*)*)/g);
+  const parts = text.split(/(@[A-Z][a-z'-]*(?:\s+[A-Z][a-z'-]*)*)/g);
 
   return (
     <span className={className}>
@@ -172,7 +172,11 @@ export function MentionText({ text, className }: { text: string; className?: str
         part.startsWith("@") ? (
           <mark
             key={`${part}-${index}`}
-            className="rounded bg-primary/20 px-1 font-semibold text-primary"
+            className="rounded px-1 font-semibold"
+            style={{
+              backgroundColor: "rgba(34, 211, 238, 0.22)",
+              color: "rgb(14, 116, 144)",
+            }}
           >
             {part}
           </mark>
