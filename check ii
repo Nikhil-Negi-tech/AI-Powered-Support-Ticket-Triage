@@ -1,4 +1,3 @@
-npm install @tiptap/extension-mention @tiptap/suggestion
 "use client";
 
 import * as React from "react";
@@ -24,7 +23,10 @@ import Link from "@tiptap/extension-link";
 import Underline from "@tiptap/extension-underline";
 import CharacterCount from "@tiptap/extension-character-count";
 import Mention from "@tiptap/extension-mention";
-import Suggestion, { type SuggestionKeyDownProps } from "@tiptap/suggestion";
+import type {
+  SuggestionKeyDownProps,
+  SuggestionOptions,
+} from "@tiptap/suggestion";
 import type { Editor, JSONContent } from "@tiptap/core";
 import type { EditorView } from "@tiptap/pm/view";
 import { parseSpreadsheetClipboard } from "@/lib/spreadsheet-paste";
@@ -160,8 +162,10 @@ function positionMentionPopup(popup: HTMLDivElement, rect: DOMRect) {
   popup.style.top = `${rect.bottom + 6}px`;
 }
 
-function createMentionSuggestion(searchUrl: string) {
-  return Suggestion<MentionUser>({
+function createMentionSuggestion(
+  searchUrl: string
+): Omit<SuggestionOptions<MentionUser>, "editor"> {
+  return {
     char: "@",
     allowSpaces: true,
     items: async ({ query }) => {
@@ -215,7 +219,7 @@ function createMentionSuggestion(searchUrl: string) {
         },
       };
     },
-  });
+  };
 }
 
 function createRichTextExtensions(
