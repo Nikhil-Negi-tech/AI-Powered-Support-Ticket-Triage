@@ -1,157 +1,545 @@
+"use client";
+
 import * as React from "react";
+import {
+  Bold,
+  Columns3,
+  Heading2,
+  Italic,
+  Link2,
+  List,
+  ListOrdered,
+  Quote,
+  RemoveFormatting,
+  Rows3,
+  Table2,
+  Trash2,
+  Underline as UnderlineIcon,
+} from "lucide-react";
+import { EditorContent, ReactRenderer, useEditor } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
+import Link from "@tiptap/extension-link";
+import Underline from "@tiptap/extension-underline";
+import CharacterCount from "@tiptap/extension-character-count";
+import Mention from "@tiptap/extension-mention";
+import type {
+  SuggestionKeyDownProps,
+  SuggestionOptions,
+} from "@tiptap/suggestion";
+import type { Editor, JSONContent } from "@tiptap/core";
+import type { EditorView } from "@tiptap/pm/view";
+import { parseSpreadsheetClipboard } from "@/lib/spreadsheet-paste";
 import { cn } from "@/lib/utils";
 
-export interface TextareaProps
-  extends React.TextareaHTMLAttributes<HTMLTextAreaElement> {
+interface RichTextEditorProps {
+  value: string;
+  onChange: (html: string, text: string) => void;
+  onBlur?: () => void;
+  placeholder?: string;
+  ariaLabel: string;
   invalid?: boolean;
+  maxLength?: number;
+  compact?: boolean;
   mentionSearchUrl?: string;
+}
+
+interface RichTextContentProps {
+  value: string;
+  className?: string;
+}
+
+interface ToolbarButtonProps {
+  label: string;
+  onClick: () => void;
+  active?: boolean;
+  disabled?: boolean;
+  children: React.ReactNode;
+}
+
+function ToolbarButton({
+  label,
+  onClick,
+  active,
+  disabled,
+  children,
+}: ToolbarButtonProps) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-pressed={active || undefined}
+      disabled={disabled}
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={onClick}
+      className={cn(
+        "flex h-8 w-8 shrink-0 items-center justify-center rounded border border-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40",
+        active && "border-border bg-muted text-foreground"
+      )}
+    >
+      {children}
+    </button>
+  );
 }
 
 interface MentionUser {
   id: string;
   name: string;
+  label?: string;
   email: string;
   department?: string;
+  profilePhotoUrl?: string;
 }
 
-const Textarea = React.forwardRef<
-  HTMLTextAreaElement,
-  TextareaProps
->(({ className, invalid, mentionSearchUrl = "/api/users/search", value, onChange, onKeyDown, ...props }, ref) => {
-  const textareaRef = React.useRef<HTMLTextAreaElement>(null);
-  const [users, setUsers] = React.useState<MentionUser[]>([]);
+interface MentionListProps {
+  items: MentionUser[];
+  command: (item: MentionUser) => void;
+}
+
+const MentionList = React.forwardRef<
+  { onKeyDown: (props: SuggestionKeyDownProps) => boolean },
+  MentionListProps
+>(({ items, command }, ref) => {
   const [selectedIndex, setSelectedIndex] = React.useState(0);
-  const [mentionRange, setMentionRange] = React.useState<{ start: number; end: number } | null>(null);
 
-  React.useImperativeHandle(ref, () => textareaRef.current as HTMLTextAreaElement);
+  React.useEffect(() => setSelectedIndex(0), [items]);
 
-  const updateMentionSearch = React.useCallback(async () => {
-    if (!mentionSearchUrl || typeof value !== "string" || !textareaRef.current) {
-      setMentionRange(null);
-      setUsers([]);
-      return;
-    }
+  const selectItem = (index: number) => {
+    const item = items[index];
+    if (item) command({ ...item, label: item.label ?? item.name });
+  };
 
-    const caret = textareaRef.current.selectionStart;
-    const beforeCaret = value.slice(0, caret);
-    const match = beforeCaret.match(/(^|\s)@([^\s@]*)$/);
-    if (!match || match[2].length < 2) {
-      setMentionRange(null);
-      setUsers([]);
-      return;
-    }
-
-    const start = caret - match[2].length - 1;
-    setMentionRange({ start, end: caret });
-
-    try {
-      const response = await fetch(
-        `${mentionSearchUrl}?q=${encodeURIComponent(match[2])}`
-      );
-      if (!response.ok) {
-        setUsers([]);
-        return;
+  React.useImperativeHandle(ref, () => ({
+    onKeyDown: ({ event }) => {
+      if (!items.length) return false;
+      if (event.key === "ArrowUp") {
+        setSelectedIndex((index) => (index + items.length - 1) % items.length);
+        return true;
       }
-      const data = (await response.json()) as { users?: MentionUser[] };
-      setUsers(data.users ?? []);
-      setSelectedIndex(0);
-    } catch {
-      setUsers([]);
-    }
-  }, [mentionSearchUrl, value]);
-
-  const selectMention = React.useCallback(
-    (user: MentionUser) => {
-      if (!mentionRange || typeof value !== "string" || !onChange) return;
-      const nextValue = `${value.slice(0, mentionRange.start)}@${user.name} ${value.slice(mentionRange.end)}`;
-      const nextCaret = mentionRange.start + user.name.length + 2;
-      onChange({
-        target: { value: nextValue },
-        currentTarget: { value: nextValue },
-      } as React.ChangeEvent<HTMLTextAreaElement>);
-      setMentionRange(null);
-      setUsers([]);
-      requestAnimationFrame(() => {
-        textareaRef.current?.focus();
-        textareaRef.current?.setSelectionRange(nextCaret, nextCaret);
-      });
+      if (event.key === "ArrowDown") {
+        setSelectedIndex((index) => (index + 1) % items.length);
+        return true;
+      }
+      if (event.key === "Enter") {
+        selectItem(selectedIndex);
+        return true;
+      }
+      return false;
     },
-    [mentionRange, onChange, value]
-  );
+  }));
 
-  React.useEffect(() => {
-    void updateMentionSearch();
-  }, [updateMentionSearch]);
+  if (!items.length) return null;
 
   return (
-    <div className="relative">
-      <textarea
-        ref={textareaRef}
-        aria-invalid={invalid || undefined}
-        value={value}
-        onChange={(event) => {
-          onChange?.(event);
-          void updateMentionSearch();
-        }}
-        onKeyDown={(event) => {
-          if (users.length && mentionRange) {
-            if (event.key === "ArrowDown") {
-              event.preventDefault();
-              setSelectedIndex((index) => (index + 1) % users.length);
-              return;
-            }
-            if (event.key === "ArrowUp") {
-              event.preventDefault();
-              setSelectedIndex((index) => (index + users.length - 1) % users.length);
-              return;
-            }
-            if (event.key === "Enter" || event.key === "Tab") {
-              event.preventDefault();
-              selectMention(users[selectedIndex]);
-              return;
-            }
-            if (event.key === "Escape") {
-              setMentionRange(null);
-              setUsers([]);
-              return;
-            }
-          }
-          onKeyDown?.(event);
-        }}
-        className={cn(
-          "flex min-h-[96px] w-full rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
-          invalid && "border-destructive focus-visible:ring-destructive",
-          className
-        )}
-        {...props}
-      />
-      {mentionSearchUrl && users.length > 0 && mentionRange && (
-        <div className="absolute left-0 top-full z-50 mt-1 w-full max-w-sm rounded-md border border-border bg-popover p-1 shadow-lg">
-          {users.map((user, index) => (
-            <button
-              key={user.id}
-              type="button"
-              className={cn(
-                "block w-full rounded px-3 py-2 text-left text-sm",
-                index === selectedIndex ? "bg-accent" : "hover:bg-muted"
-              )}
-              onMouseDown={(event) => {
-                event.preventDefault();
-                selectMention(user);
-              }}
-            >
-              <span className="block font-medium">{user.name}</span>
-              <span className="block truncate text-xs text-muted-foreground">
-                {user.email}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
+    <div className="w-72 overflow-hidden rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-lg">
+      {items.map((item, index) => (
+        <button
+          key={item.id}
+          type="button"
+          className={cn(
+            "block w-full rounded px-3 py-2 text-left text-sm",
+            index === selectedIndex ? "bg-accent" : "hover:bg-muted"
+          )}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            selectItem(index);
+          }}
+        >
+          <span className="block font-medium">{item.name}</span>
+          <span className="block truncate text-xs text-muted-foreground">
+            {item.email}
+          </span>
+        </button>
+      ))}
     </div>
   );
 });
 
-Textarea.displayName = "Textarea";
+MentionList.displayName = "MentionList";
 
-export { Textarea };
+function positionMentionPopup(popup: HTMLDivElement, rect: DOMRect) {
+  popup.style.left = `${rect.left}px`;
+  popup.style.top = `${rect.bottom + 6}px`;
+}
+
+function createMentionSuggestion(
+  searchUrl: string
+): Omit<SuggestionOptions<MentionUser>, "editor"> {
+  return {
+    char: "@",
+    allowSpaces: true,
+    items: async ({ query }) => {
+      if (query.trim().length < 2) return [];
+      try {
+        const response = await fetch(
+          `${searchUrl}?q=${encodeURIComponent(query.trim())}`
+        );
+        if (!response.ok) {
+          console.error(`Mention search failed (${response.status})`, searchUrl);
+          return [];
+        }
+        const data = (await response.json()) as { users?: MentionUser[] };
+        return (data.users ?? []).map((user) => ({
+          ...user,
+          label: user.label ?? user.name,
+        }));
+      } catch {
+        console.error("Mention search request failed", searchUrl);
+        return [];
+      }
+    },
+    render: () => {
+      let renderer: ReactRenderer<{
+        onKeyDown: (props: SuggestionKeyDownProps) => boolean;
+      }>;
+      let popup: HTMLDivElement;
+
+      return {
+        onStart: (props) => {
+          renderer = new ReactRenderer(MentionList, {
+            props,
+            editor: props.editor,
+          });
+          popup = document.createElement("div");
+          popup.style.position = "fixed";
+          popup.style.zIndex = "50";
+          document.body.appendChild(popup);
+          popup.appendChild(renderer.element);
+          const rect = props.clientRect?.();
+          if (rect) positionMentionPopup(popup, rect);
+        },
+        onUpdate: (props) => {
+          renderer.updateProps(props);
+          const rect = props.clientRect?.();
+          if (rect) positionMentionPopup(popup, rect);
+        },
+        onKeyDown: (props) => {
+          if (props.event.key === "Escape") {
+            popup?.remove();
+            return true;
+          }
+          return renderer?.ref?.onKeyDown(props) ?? false;
+        },
+        onExit: () => {
+          popup?.remove();
+          renderer?.destroy();
+        },
+      };
+    },
+  };
+}
+
+function createRichTextExtensions(
+  maxLength: number | null = null,
+  mentionSearchUrl?: string
+) {
+  return [
+    StarterKit.configure({
+      link: false,
+      underline: false,
+      heading: { levels: [2] },
+    }),
+    Link.configure({ openOnClick: false, autolink: true }),
+    Underline,
+    Table.configure({ resizable: true, lastColumnResizable: false }),
+    TableRow,
+    TableHeader,
+    TableCell,
+    CharacterCount.configure({ limit: maxLength }),
+    Mention.configure({
+      HTMLAttributes: { class: "mention text-primary font-medium" },
+      suggestion: mentionSearchUrl
+        ? createMentionSuggestion(mentionSearchUrl)
+        : undefined,
+    }),
+  ];
+}
+
+function RichTextSurface({
+  children,
+  className,
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "relative",
+        "[&_.tiptap_p]:my-1 [&_.tiptap_h2]:my-2 [&_.tiptap_h2]:text-xl [&_.tiptap_h2]:font-semibold",
+        "[&_.tiptap_ul]:my-2 [&_.tiptap_ul]:list-disc [&_.tiptap_ul]:pl-6 [&_.tiptap_ol]:my-2 [&_.tiptap_ol]:list-decimal [&_.tiptap_ol]:pl-6",
+        "[&_.tiptap_blockquote]:my-2 [&_.tiptap_blockquote]:border-l-4 [&_.tiptap_blockquote]:border-border [&_.tiptap_blockquote]:pl-3 [&_.tiptap_blockquote]:text-muted-foreground",
+        "[&_.tiptap_a]:text-primary [&_.tiptap_a]:underline",
+        "[&_.tableWrapper]:my-2 [&_.tableWrapper]:overflow-x-auto [&_.tiptap_table]:w-full [&_.tiptap_table]:border-collapse",
+        "[&_.tiptap_th]:min-w-32 [&_.tiptap_th]:border [&_.tiptap_th]:border-border [&_.tiptap_th]:bg-muted [&_.tiptap_th]:px-3 [&_.tiptap_th]:py-2 [&_.tiptap_th]:text-left [&_.tiptap_th]:font-semibold",
+        "[&_.tiptap_td]:min-w-32 [&_.tiptap_td]:border [&_.tiptap_td]:border-border [&_.tiptap_td]:px-3 [&_.tiptap_td]:py-2 [&_.tiptap_td]:align-top",
+        "[&_.selectedCell]:bg-primary/10",
+        className
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+function spreadsheetTableContent(rows: string[][]): JSONContent {
+  return {
+    type: "table",
+    content: rows.map((row, rowIndex) => ({
+      type: "tableRow",
+      content: row.map((cell) => ({
+        type: rowIndex === 0 ? "tableHeader" : "tableCell",
+        content: cell.split("\n").map((line) => ({
+          type: "paragraph",
+          content: line ? [{ type: "text", text: line }] : undefined,
+        })),
+      })),
+    })),
+  };
+}
+
+function insertSpreadsheetTable(
+  view: EditorView,
+  event: ClipboardEvent
+): boolean {
+  const rows = parseSpreadsheetClipboard(
+    event.clipboardData?.getData("text/plain") ?? ""
+  );
+  if (!rows) return false;
+
+  event.preventDefault();
+  const table = view.state.schema.nodeFromJSON(spreadsheetTableContent(rows));
+  view.dispatch(
+    view.state.tr.replaceSelectionWith(table).scrollIntoView()
+  );
+  return true;
+}
+
+function setLink(editor: Editor) {
+  const currentUrl = editor.getAttributes("link").href as string | undefined;
+  const url = window.prompt("Enter a URL", currentUrl ?? "https://");
+
+  if (url === null) return;
+  if (!url.trim()) {
+    editor.chain().focus().extendMarkRange("link").unsetLink().run();
+    return;
+  }
+
+  editor
+    .chain()
+    .focus()
+    .extendMarkRange("link")
+    .setLink({ href: url.trim() })
+    .run();
+}
+
+export function RichTextEditor({
+  value,
+  onChange,
+  onBlur,
+  placeholder,
+  ariaLabel,
+  invalid,
+  maxLength,
+  compact = false,
+  mentionSearchUrl = "/api/users/search",
+}: RichTextEditorProps) {
+  const editor = useEditor({
+    extensions: createRichTextExtensions(maxLength ?? null, mentionSearchUrl),
+    content: value,
+    immediatelyRender: false,
+    editorProps: {
+      attributes: {
+        "aria-label": ariaLabel,
+        class: cn(
+          "tiptap px-4 py-3 text-sm text-foreground outline-none",
+          compact ? "min-h-32" : "min-h-56"
+        ),
+      },
+      handlePaste: insertSpreadsheetTable,
+    },
+    onUpdate: ({ editor: currentEditor }) => {
+      onChange(
+        currentEditor.isEmpty ? "" : currentEditor.getHTML(),
+        currentEditor.isEmpty
+          ? ""
+          : currentEditor.getText({ blockSeparator: "\n" })
+      );
+    },
+    onBlur,
+  });
+
+  React.useEffect(() => {
+    if (!editor) return;
+    const currentValue = editor.isEmpty ? "" : editor.getHTML();
+    if (currentValue !== value) {
+      editor.commands.setContent(value, { emitUpdate: false });
+    }
+  }, [editor, value]);
+
+  const characterCount = editor?.storage.characterCount.characters() ?? 0;
+  const inTable = editor?.isActive("table") ?? false;
+
+  return (
+    <div
+      className={cn(
+        "overflow-hidden rounded-md border border-input bg-card shadow-sm transition-colors focus-within:ring-2 focus-within:ring-ring",
+        invalid && "border-destructive focus-within:ring-destructive"
+      )}
+    >
+      <div className="flex min-h-11 flex-wrap items-center gap-1 border-b border-border bg-muted/30 px-2 py-1.5">
+        <ToolbarButton
+          label="Bold"
+          active={editor?.isActive("bold")}
+          disabled={!editor}
+          onClick={() => editor?.chain().focus().toggleBold().run()}
+        >
+          <Bold className="h-4 w-4" />
+        </ToolbarButton>
+        <ToolbarButton
+          label="Italic"
+          active={editor?.isActive("italic")}
+          disabled={!editor}
+          onClick={() => editor?.chain().focus().toggleItalic().run()}
+        >
+          <Italic className="h-4 w-4" />
+        </ToolbarButton>
+        <ToolbarButton
+          label="Underline"
+          active={editor?.isActive("underline")}
+          disabled={!editor}
+          onClick={() => editor?.chain().focus().toggleUnderline().run()}
+        >
+          <UnderlineIcon className="h-4 w-4" />
+        </ToolbarButton>
+        <span className="mx-1 h-6 w-px bg-border" />
+        <ToolbarButton
+          label="Bullet list"
+          active={editor?.isActive("bulletList")}
+          disabled={!editor}
+          onClick={() => editor?.chain().focus().toggleBulletList().run()}
+        >
+          <List className="h-4 w-4" />
+        </ToolbarButton>
+        <ToolbarButton
+          label="Numbered list"
+          active={editor?.isActive("orderedList")}
+          disabled={!editor}
+          onClick={() => editor?.chain().focus().toggleOrderedList().run()}
+        >
+          <ListOrdered className="h-4 w-4" />
+        </ToolbarButton>
+        <ToolbarButton
+          label="Block quote"
+          active={editor?.isActive("blockquote")}
+          disabled={!editor}
+          onClick={() => editor?.chain().focus().toggleBlockquote().run()}
+        >
+          <Quote className="h-4 w-4" />
+        </ToolbarButton>
+        <ToolbarButton
+          label="Heading"
+          active={editor?.isActive("heading", { level: 2 })}
+          disabled={!editor}
+          onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}
+        >
+          <Heading2 className="h-4 w-4" />
+        </ToolbarButton>
+        <ToolbarButton
+          label="Link"
+          active={editor?.isActive("link")}
+          disabled={!editor}
+          onClick={() => editor && setLink(editor)}
+        >
+          <Link2 className="h-4 w-4" />
+        </ToolbarButton>
+        <ToolbarButton
+          label="Insert table"
+          active={inTable}
+          disabled={!editor}
+          onClick={() =>
+            editor
+              ?.chain()
+              .focus()
+              .insertTable({ rows: 3, cols: 3, withHeaderRow: true })
+              .run()
+          }
+        >
+          <Table2 className="h-4 w-4" />
+        </ToolbarButton>
+        <ToolbarButton
+          label="Clear formatting"
+          disabled={!editor}
+          onClick={() => editor?.chain().focus().unsetAllMarks().clearNodes().run()}
+        >
+          <RemoveFormatting className="h-4 w-4" />
+        </ToolbarButton>
+
+        {inTable && (
+          <>
+            <span className="mx-1 h-6 w-px bg-border" />
+            <ToolbarButton
+              label="Add row below"
+              onClick={() => editor?.chain().focus().addRowAfter().run()}
+            >
+              <Rows3 className="h-4 w-4" />
+            </ToolbarButton>
+            <ToolbarButton
+              label="Add column after"
+              onClick={() => editor?.chain().focus().addColumnAfter().run()}
+            >
+              <Columns3 className="h-4 w-4" />
+            </ToolbarButton>
+            <ToolbarButton
+              label="Delete table"
+              onClick={() => editor?.chain().focus().deleteTable().run()}
+            >
+              <Trash2 className="h-4 w-4" />
+            </ToolbarButton>
+          </>
+        )}
+
+        {maxLength !== undefined && (
+          <span className="ml-auto px-1 text-xs text-muted-foreground">
+            {characterCount}/{maxLength}
+          </span>
+        )}
+      </div>
+
+      <RichTextSurface>
+        {!editor?.isFocused && editor?.isEmpty && placeholder && (
+          <span className="pointer-events-none absolute left-4 top-3 text-sm text-muted-foreground">
+            {placeholder}
+          </span>
+        )}
+        <EditorContent editor={editor} />
+      </RichTextSurface>
+    </div>
+  );
+}
+
+export function RichTextContent({ value, className }: RichTextContentProps) {
+  const editor = useEditor({
+    extensions: createRichTextExtensions(),
+    content: value,
+    editable: false,
+    immediatelyRender: false,
+    editorProps: {
+      attributes: {
+        class: "tiptap text-sm text-foreground outline-none",
+      },
+    },
+  });
+
+  React.useEffect(() => {
+    if (!editor || editor.getHTML() === value) return;
+    editor.commands.setContent(value, { emitUpdate: false });
+  }, [editor, value]);
+
+  return (
+    <RichTextSurface className={className}>
+      <EditorContent editor={editor} />
+    </RichTextSurface>
+  );
+}
