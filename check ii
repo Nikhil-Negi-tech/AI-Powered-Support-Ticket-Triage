@@ -1,211 +1,189 @@
-"use client";
-
 import * as React from "react";
-import { useFormContext, useWatch } from "react-hook-form";
-import { History, MessageSquare, Send, ListChecks } from "lucide-react";
-import {
-  Card,
-  CardContent,
-} from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Avatar } from "@/components/ui/avatar";
-import {
-  RichTextEditor,
-} from "@/components/ui/rich-text-editor";
-import { MentionText } from "@/components/ui/textarea";
-import { cn, formatDateTime } from "@/lib/utils";
-import { CURRENT_USER, SAMPLE_HISTORY } from "@/lib/mock-data";
-import type { Approver } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
-type TabKey = "comments" | "history" | "details";
-
-interface Comment {
-  id: string;
-  author: string;
-  body: string;
-  plainText: string;
-  at: Date;
+export interface TextareaProps
+  extends React.TextareaHTMLAttributes<HTMLTextAreaElement> {
+  invalid?: boolean;
+  mentionSearchUrl?: string;
 }
 
-const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
-  { key: "comments", label: "Comments", icon: <MessageSquare className="h-4 w-4" /> },
-  { key: "history", label: "History", icon: <History className="h-4 w-4" /> },
-  { key: "details", label: "Details", icon: <ListChecks className="h-4 w-4" /> },
-];
+interface MentionUser {
+  id: string;
+  name: string;
+  email: string;
+  department?: string;
+}
 
-export function ActivityTabs() {
-  const [tab, setTab] = React.useState<TabKey>("comments");
-  const [comments, setComments] = React.useState<Comment[]>([]);
-  const [draft, setDraft] = React.useState("");
-  const [draftPlainText, setDraftPlainText] = React.useState("");
+const Textarea = React.forwardRef<
+  HTMLTextAreaElement,
+  TextareaProps
+>(({ className, invalid, mentionSearchUrl = "/api/users/search", value, onChange, onKeyDown, ...props }, ref) => {
+  const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+  const [users, setUsers] = React.useState<MentionUser[]>([]);
+  const [selectedIndex, setSelectedIndex] = React.useState(0);
+  const [mentionRange, setMentionRange] = React.useState<{ start: number; end: number } | null>(null);
 
-  // Live audit trail of approver status/comments for the History timeline.
-  const { control } = useFormContext();
-  const approvers =
-    (useWatch({ control, name: "approvers" }) as Approver[] | undefined) ?? [];
-  const approverAudit = approvers.flatMap((approver) => {
-    const entries: { id: string; actor: string; action: string }[] = [
-      {
-        id: `${approver.id}-status`,
-        actor: approver.name,
-        action: `was added as an approver.`,
-      },
-    ];
-    if (approver.comment?.trim()) {
-      entries.push({
-        id: `${approver.id}-comment`,
-        actor: approver.name,
-        action: `added an approval comment.`,
-      });
+  React.useImperativeHandle(ref, () => textareaRef.current as HTMLTextAreaElement);
+
+  const updateMentionSearch = React.useCallback(async (
+    nextValue = value,
+    nextCaret = textareaRef.current?.selectionStart ?? 0
+  ) => {
+    if (!mentionSearchUrl || typeof nextValue !== "string") {
+      setMentionRange(null);
+      setUsers([]);
+      return;
     }
-    return entries;
-  });
 
-  const addComment = () => {
-    const body = draft.trim();
-    const plainText = draftPlainText.trim();
-    if (!body) return;
-    setComments((prev) => [
-      ...prev,
-      {
-        id: crypto.randomUUID(),
-        author: CURRENT_USER.name,
-        body,
-        plainText: plainText || body,
-        at: new Date(),
-      },
-    ]);
-    setDraft("");
-    setDraftPlainText("");
-  };
+    const caret = nextCaret;
+    const beforeCaret = nextValue.slice(0, caret);
+    const match = beforeCaret.match(/(^|\s)@([^@]*)$/);
+    const query = match?.[2].trim() ?? "";
+    if (!match || query.length < 2) {
+      setMentionRange(null);
+      setUsers([]);
+      return;
+    }
+
+    const start = caret - match[2].length - 1;
+    setMentionRange({ start, end: caret });
+
+    try {
+      const response = await fetch(
+        `${mentionSearchUrl}?q=${encodeURIComponent(query)}`
+      );
+      if (!response.ok) {
+        setUsers([]);
+        return;
+      }
+      const data = (await response.json()) as { users?: MentionUser[] };
+      setUsers(data.users ?? []);
+      setSelectedIndex(0);
+    } catch {
+      setUsers([]);
+    }
+  }, [mentionSearchUrl, value]);
+
+  const selectMention = React.useCallback(
+    (user: MentionUser) => {
+      if (!mentionRange || typeof value !== "string" || !onChange) return;
+      const nextValue = `${value.slice(0, mentionRange.start)}@${user.name} ${value.slice(mentionRange.end)}`;
+      const nextCaret = mentionRange.start + user.name.length + 2;
+      onChange({
+        target: { value: nextValue },
+        currentTarget: { value: nextValue },
+      } as React.ChangeEvent<HTMLTextAreaElement>);
+      setMentionRange(null);
+      setUsers([]);
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        textareaRef.current?.setSelectionRange(nextCaret, nextCaret);
+      });
+    },
+    [mentionRange, onChange, value]
+  );
+
+  React.useEffect(() => {
+    void updateMentionSearch();
+  }, [updateMentionSearch]);
 
   return (
-    <Card>
-      <div
-        role="tablist"
-        aria-label="Activity"
-        className="flex border-b border-border px-2"
-      >
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            role="tab"
-            aria-selected={tab === t.key}
-            onClick={() => setTab(t.key)}
-            className={cn(
-              "flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-              tab === t.key
-                ? "border-primary text-primary"
-                : "border-transparent text-muted-foreground hover:text-foreground"
-            )}
+    <div className="relative">
+      <textarea
+        ref={textareaRef}
+        aria-invalid={invalid || undefined}
+        value={value}
+        onChange={(event) => {
+          onChange?.(event);
+          void updateMentionSearch(
+            event.currentTarget.value,
+            event.currentTarget.selectionStart
+          );
+        }}
+        onKeyDown={(event) => {
+          if (users.length && mentionRange) {
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              setSelectedIndex((index) => (index + 1) % users.length);
+              return;
+            }
+            if (event.key === "ArrowUp") {
+              event.preventDefault();
+              setSelectedIndex((index) => (index + users.length - 1) % users.length);
+              return;
+            }
+            if (event.key === "Enter" || event.key === "Tab") {
+              event.preventDefault();
+              selectMention(users[selectedIndex]);
+              return;
+            }
+            if (event.key === "Escape") {
+              setMentionRange(null);
+              setUsers([]);
+              return;
+            }
+          }
+          onKeyDown?.(event);
+        }}
+        className={cn(
+          "flex min-h-[96px] w-full rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
+          invalid && "border-destructive focus-visible:ring-destructive",
+          className
+        )}
+        {...props}
+      />
+      {mentionSearchUrl && users.length > 0 && mentionRange && (
+        <div className="absolute left-0 top-full z-50 mt-1 w-full max-w-sm rounded-md border border-border bg-popover p-1 shadow-lg">
+          {users.map((user, index) => (
+            <button
+              key={user.id}
+              type="button"
+              className={cn(
+                "block w-full rounded px-3 py-2 text-left text-sm",
+                index === selectedIndex ? "bg-accent" : "hover:bg-muted"
+              )}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                selectMention(user);
+              }}
+            >
+              <span className="block font-medium">{user.name}</span>
+              <span className="block truncate text-xs text-muted-foreground">
+                {user.email}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
+
+Textarea.displayName = "Textarea";
+
+export { Textarea };
+
+export function MentionText({ text, className }: { text: string; className?: string }) {
+  const parts = text.split(/(@[A-Z][a-z'-]*(?:\s+[A-Z][a-z'-]*)*)/g);
+
+  return (
+    <span className={className}>
+      {parts.map((part, index) =>
+        part.startsWith("@") ? (
+          <mark
+            key={`${part}-${index}`}
+            className="rounded px-1 font-semibold"
+            style={{
+              backgroundColor: "rgba(34, 211, 238, 0.22)",
+              color: "rgb(14, 116, 144)",
+            }}
           >
-            {t.icon}
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      <CardContent className="pt-4">
-        {tab === "comments" && (
-          <div className="space-y-4">
-            <div className="flex gap-3">
-              <Avatar name={CURRENT_USER.name} size="md" />
-              <div className="flex-1">
-                <RichTextEditor
-                  value={draft}
-                  onChange={(html, text) => {
-                    setDraft(html);
-                    setDraftPlainText(text);
-                  }}
-                  ariaLabel="Comment"
-                  maxLength={5000}
-                  compact
-                  placeholder="Add a comment for the support team..."
-                />
-                <div className="mt-2 flex justify-end">
-                  <Button size="sm" onClick={addComment} disabled={!draft.trim()}>
-                    <Send className="h-4 w-4" />
-                    Add Comment
-                  </Button>
-                </div>
-              </div>
-            </div>
-
-            {comments.length === 0 ? (
-              <p className="py-4 text-center text-sm text-muted-foreground">
-                No comments yet. Comments are stored locally for this session
-                only.
-              </p>
-            ) : (
-              <ul className="space-y-3">
-                {comments.map((c) => (
-                  <li key={c.id} className="flex gap-3">
-                    <Avatar name={c.author} size="md" />
-                    <div className="flex-1 rounded-md border border-border bg-muted/40 px-3 py-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-semibold text-foreground">
-                          {c.author}
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          {formatDateTime(c.at)}
-                        </span>
-                      </div>
-                      <MentionText
-                        text={c.plainText}
-                        className="mt-1 block text-sm leading-6"
-                      />
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-
-        {tab === "history" && (
-          <ol className="relative space-y-4 border-l border-border pl-5">
-            {SAMPLE_HISTORY.map((h) => (
-              <li key={h.id} className="relative">
-                <span className="absolute -left-[23px] top-1 h-2.5 w-2.5 rounded-full border-2 border-card bg-primary" />
-                <p className="text-sm text-foreground">
-                  <span className="font-semibold">{h.actor}</span> {h.action}
-                </p>
-                <p className="text-xs text-muted-foreground">{h.timestamp}</p>
-              </li>
-            ))}
-            {approverAudit.map((entry) => (
-              <li key={entry.id} className="relative">
-                <span className="absolute -left-[23px] top-1 h-2.5 w-2.5 rounded-full border-2 border-card bg-primary" />
-                <div>
-                  <p className="text-sm text-foreground">
-                    <span className="font-semibold">{entry.actor}</span>{" "}
-                    {entry.action}
-                  </p>
-
-                  {entry.action === "added an approval comment." &&
-                    approvers.find((a) => a.id === entry.id.replace("-comment", ""))?.comment && (
-                      <p className="mt-1 text-xs italic text-muted-foreground">
-                        "
-                        {approvers.find(
-                          (a) => a.id === entry.id.replace("-comment", "")
-                        )?.comment}
-                        "
-                      </p>
-                    )}
-                </div>
-                <p className="text-xs text-muted-foreground">Just now</p>
-              </li>
-            ))}
-          </ol>
-        )}
-
-        {tab === "details" && (
-          <p className="py-4 text-center text-sm text-muted-foreground">
-            Additional system details will appear here once the request has been
-            submitted.
-          </p>
-        )}
-      </CardContent>
-    </Card>
+            {part}
+          </mark>
+        ) : (
+          <React.Fragment key={`${part}-${index}`}>{part}</React.Fragment>
+        )
+      )}
+    </span>
   );
 }
