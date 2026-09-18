@@ -1,109 +1,60 @@
 "use client";
 
 import * as React from "react";
-import { FormProvider, useForm } from "react-hook-form";
 import { useRouter } from "next/navigation";
+import { useForm, FormProvider, type DefaultValues } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
-import { CheckCircle2, KeyRound } from "lucide-react";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Label } from "@/components/ui/label";
+import { CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
-import { FieldError, FieldHint } from "@/components/ui/field";
-import { StatusBadge } from "@/components/ui/status-badges";
-import { formatDateTime } from "@/lib/utils";
-import type { AttachmentMeta } from "@/lib/types";
-import { PageHeader } from "@/components/general-request/PageHeader";
-import { StickyActionBar } from "@/components/general-request/StickyActionBar";
-import { AttachmentsCard } from "@/components/general-request/AttachmentsCard";
-import { ActivityTabs } from "@/components/general-request/ActivityTabs";
+import {
+  normalizeRequestQuestionAnswers,
+  validateRequestQuestionAnswers,
+  type RequestQuestionErrors,
+} from "@/lib/request-form-answers";
+import { generalRequestSchema, type GeneralRequestFormValues } from "@/lib/schema";
+import { DRAFT_STORAGE_KEY } from "@/lib/mock-data";
 import { useCurrentUser } from "@/components/hooks/useCurrentUser";
+import type {
+  RequestFormQuestion,
+  RequestQuestionAnswer,
+  RequestQuestionAnswers,
+} from "@/lib/service-categories";
+import type { AttachmentMeta } from "@/lib/types";
 
-const DRAFT_STORAGE_KEY = "itsm.hr-offboarding.draft.v1";
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+import { PageHeader } from "./PageHeader";
+import { RequesterInformationCard } from "./RequesterInformationCard";
+import { RequestDetailsCard } from "./RequestDetailsCard";
+import { RequestInformationCard } from "./RequestInformationCard";
+import { AttachmentsCard } from "./AttachmentsCard";
+import { ActivityTabs } from "./ActivityTabs";
+import {
+  CustomQuestionsCard,
+  getRequestQuestionInputId,
+} from "./CustomQuestionsCard";
+import { StickyActionBar } from "./StickyActionBar";
 
-const personSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  email: z.string(),
-  department: z.string(),
-});
+const EMPTY_CUSTOM_QUESTIONS: RequestFormQuestion[] = [];
+const CUSTOM_ANSWERS_DRAFT_KEY = "__customQuestionAnswers";
 
-const offboardingSchema = z.object({
-  exitEmployeeName: z.string().trim().min(2, "Exit employee name is required"),
-  exitEmployeeEmail: z
-    .string()
-    .trim()
-    .min(1, "Exit employee email ID is required")
-    .refine(
-      (value) =>
-        value
-          .split(",")
-          .map((email) => email.trim())
-          .filter(Boolean)
-          .every((email) => EMAIL_REGEX.test(email)),
-      { message: "Enter valid email address(es), separated by commas" }
-    ),
-  lanDomainId: z.string().trim().min(1, "LAN/Domain ID is required"),
-  employeeCode: z.string().trim().min(1, "Employee code is required"),
-  department: z.string().trim().min(1, "Department is required"),
-  location: z.string().trim().min(1, "Location is required"),
-  reportingManager: z
-    .string()
-    .trim()
-    .min(1, "Reporting manager email is required")
-    .regex(EMAIL_REGEX, "Enter a valid email address"),
-  lastWorkingDate: z.string().trim().min(1, "Last working date is required"),
-  emailForwarding: z.string().trim().max(1000).optional().default(""),
-  mailboxDelegation: z.string().trim().max(1000).optional().default(""),
-  oneDriveDelegation: z.string().trim().max(1000).optional().default(""),
-  additionalRemarks: z.string().trim().max(1000).optional().default(""),
-
-  // Assignment and tracking
-  assignedDepartment: z.string().default("Service Desk"),
-  assignedTo: personSchema.nullable().default(null),
-  followers: z.array(personSchema).default([]),
-  tags: z.array(z.string()).max(10, "Maximum of 10 tags").default([]),
-  approvers: z
-    .array(
-      z.object({
-        id: z.string(),
-        name: z.string(),
-        email: z.string(),
-        department: z.string(),
-        status: z
-          .enum(["Active", "Approved", "On Hold", "Cancelled"])
-          .default("Active"),
-        comment: z.string().max(500, "Comment is too long").default(""),
-      })
-    )
-    .default([]),
-});
-
-type OffboardingValues = z.infer<typeof offboardingSchema>;
-
-const defaultValues: OffboardingValues = {
-  exitEmployeeName: "",
-  exitEmployeeEmail: "",
-  lanDomainId: "",
-  employeeCode: "",
+const defaultValues: DefaultValues<GeneralRequestFormValues> = {
+  requesterName: "",
+  email: "",
   department: "",
-  location: "",
-  reportingManager: "",
-  lastWorkingDate: "",
-  emailForwarding: "",
-  mailboxDelegation: "",
-  oneDriveDelegation: "",
-  additionalRemarks: "",
+  manager: "",
+  officeLocation: "",
+  contactNumber: "",
+  onBehalf: false,
+  requestedFor: null,
+  title: "",
+  category: "" as GeneralRequestFormValues["category"],
+  specifyCategory: "",
+  description: { html: "", text: "" },
+  businessJustification: "",
+  businessImpact: "",
+  priority: "Medium",
+  urgentReason: "",
+  usersAffected: "",
   assignedDepartment: "Service Desk",
   assignedTo: null,
   followers: [],
@@ -111,82 +62,130 @@ const defaultValues: OffboardingValues = {
   approvers: [],
 };
 
-function generateReferenceId(): string {
-  const n = Math.floor(Math.random() * 900000) + 100;
-  return `OFB-${String(n).padStart(6, "0")}`;
-}
-
-function SummaryRow({
-  label,
-  children,
+export function GeneralRequestForm({
+  formId = "general",
+  formTitle = "General Request",
+  formDescription =
+  "Submit a request that does not belong to an existing service category.",
+  questions = EMPTY_CUSTOM_QUESTIONS,
 }: {
-  label: string;
-  children: React.ReactNode;
+  formId?: string;
+  formTitle?: string;
+  formDescription?: string;
+  questions?: RequestFormQuestion[];
 }) {
-  return (
-    <div className="flex items-center justify-between gap-4 py-1">
-      <span className="text-sm text-muted-foreground">{label}</span>
-      <span className="text-right text-sm font-medium text-foreground">
-        {children}
-      </span>
-    </div>
-  );
-}
-
-export function EmployeeOffboardingForm() {
   const router = useRouter();
   const createdAt = React.useMemo(() => new Date(), []);
   const { user: currentUser } = useCurrentUser();
-  const draftStorageKey = currentUser
-    ? `${DRAFT_STORAGE_KEY}.${currentUser.id}`
-    : null;
+  const draftStorageKey =
+    currentUser
+      ? `${DRAFT_STORAGE_KEY}.${currentUser.id}.${formId}`
+      : null;
 
-  const methods = useForm<OffboardingValues>({
-    resolver: zodResolver(offboardingSchema),
+  const methods = useForm<GeneralRequestFormValues>({
+    resolver: zodResolver(generalRequestSchema),
     defaultValues,
     mode: "onBlur",
   });
-  const {
-    register,
-    handleSubmit,
-    watch,
-    reset,
-    getValues,
-    formState: { errors, isDirty },
-  } = methods;
+  const resetForm = methods.reset;
 
-  const [isSubmitting, setIsSubmitting] = React.useState(false);
-  const [showSuccess, setShowSuccess] = React.useState(false);
-  const [showCancel, setShowCancel] = React.useState(false);
-  const [draftSaved, setDraftSaved] = React.useState(false);
-  const [referenceId, setReferenceId] = React.useState<string | null>(null);
-  const [submittedTitle, setSubmittedTitle] = React.useState("");
   const [attachments, setAttachments] = React.useState<AttachmentMeta[]>([]);
-  const [attachmentError, setAttachmentError] = React.useState<string | null>(
-    null
-  );
+  const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const [requestId, setRequestId] = React.useState<string | null>(null);
+  const [submittedTitle, setSubmittedTitle] = React.useState("");
+  const [submitError, setSubmitError] = React.useState<string | null>(null);
+  const [draftSaved, setDraftSaved] = React.useState(false);
+  const [showCancel, setShowCancel] = React.useState(false);
+  const [showSuccess, setShowSuccess] = React.useState(false);
+  const [questionAnswers, setQuestionAnswers] =
+    React.useState<RequestQuestionAnswers>(() =>
+      normalizeRequestQuestionAnswers(questions, {})
+    );
+  const [questionErrors, setQuestionErrors] =
+    React.useState<RequestQuestionErrors>({});
 
-  const exitName = watch("exitEmployeeName");
-  const lastWorkingDate = watch("lastWorkingDate");
+  React.useEffect(() => {
+    setQuestionAnswers((currentAnswers) =>
+      normalizeRequestQuestionAnswers(questions, currentAnswers)
+    );
+    setQuestionErrors({});
+  }, [questions]);
 
+  // Load any previously saved draft once on mount.
   React.useEffect(() => {
     if (!draftStorageKey) return;
     try {
       const raw = localStorage.getItem(draftStorageKey);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object") {
-        reset({ ...defaultValues, ...parsed });
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object") return;
+
+        const savedQuestionAnswers = parsed[CUSTOM_ANSWERS_DRAFT_KEY];
+        delete parsed[CUSTOM_ANSWERS_DRAFT_KEY];
+        if (typeof parsed.description === "string") {
+          parsed.description = {
+            html: parsed.description,
+            text: parsed.description,
+          };
+        }
+        resetForm({ ...defaultValues, ...parsed });
+        setQuestionAnswers(
+          normalizeRequestQuestionAnswers(questions, savedQuestionAnswers)
+        );
       }
     } catch {
       // Ignore malformed drafts.
     }
-  }, [draftStorageKey, reset]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftStorageKey, questions, resetForm]);
+
+  // Prefill requester information from the logged-in employee directory record.
+  React.useEffect(() => {
+    if (!currentUser) return;
+    const values = methods.getValues();
+    const fill = (
+      field: keyof GeneralRequestFormValues,
+      value: string
+    ) => {
+      if (!values[field]) {
+        methods.setValue(field, value, { shouldDirty: false });
+      }
+    };
+    fill("requesterName", currentUser.name);
+    fill("email", currentUser.email);
+    fill("department", currentUser.department);
+    fill("manager", currentUser.manager);
+    fill("officeLocation", currentUser.officeLocation);
+    fill("contactNumber", currentUser.contactNumber);
+  }, [currentUser, methods]);
+
+  const handleQuestionAnswerChange = (
+    questionId: string,
+    answer: RequestQuestionAnswer
+  ) => {
+    setQuestionAnswers((currentAnswers) => ({
+      ...currentAnswers,
+      [questionId]: answer,
+    }));
+    setQuestionErrors((currentErrors) => {
+      if (!currentErrors[questionId]) return currentErrors;
+      const nextErrors = { ...currentErrors };
+      delete nextErrors[questionId];
+      return nextErrors;
+    });
+  };
 
   const saveDraft = () => {
     if (!draftStorageKey) return;
     try {
-      localStorage.setItem(draftStorageKey, JSON.stringify(getValues()));
+      // Attachment content is never persisted — drafts store form values only.
+      localStorage.setItem(
+        draftStorageKey,
+        JSON.stringify({
+          ...methods.getValues(),
+          [CUSTOM_ANSWERS_DRAFT_KEY]: questionAnswers,
+        })
+      );
       setDraftSaved(true);
       setTimeout(() => setDraftSaved(false), 2500);
     } catch {
@@ -195,61 +194,104 @@ export function EmployeeOffboardingForm() {
   };
 
   const handleCancel = () => {
-    if (isDirty || attachments.length > 0) {
+    const hasCustomAnswers = Object.values(questionAnswers).some(
+      (answer) =>
+        answer === true ||
+        (typeof answer === "string" && answer.trim().length > 0)
+    );
+
+    if (
+      methods.formState.isDirty ||
+      attachments.length > 0 ||
+      hasCustomAnswers
+    ) {
       setShowCancel(true);
     } else {
       router.push("/");
     }
   };
 
-  const onSubmit = async (values: OffboardingValues) => {
-    if (attachments.length === 0) {
-      setAttachmentError("Attach the required offboarding document.");
+  const onSubmit = async (values: GeneralRequestFormValues) => {
+    const nextQuestionErrors = validateRequestQuestionAnswers(
+      questions,
+      questionAnswers
+    );
+    const firstInvalidQuestionId = Object.keys(nextQuestionErrors)[0];
+
+    if (firstInvalidQuestionId) {
+      setQuestionErrors(nextQuestionErrors);
       requestAnimationFrame(() => {
-        document
-          .getElementById("offboarding-attachments")
-          ?.scrollIntoView({ behavior: "smooth", block: "center" });
+        const input = document.getElementById(
+          getRequestQuestionInputId(firstInvalidQuestionId)
+        );
+        input?.scrollIntoView({ behavior: "smooth", block: "center" });
+        input?.focus();
       });
       return;
     }
 
-    setAttachmentError(null);
+    setQuestionErrors({});
+    const uploadingFiles = attachments.some(
+      (a) => a.status === "uploading"
+    );
+    const failedUploads = attachments.some(
+      (a) => a.status === "error"
+    );
+
+    if (failedUploads) {
+      setSubmitError(
+        "One or more attachments failed to upload. Remove them or upload again."
+      );
+      return;
+    }
+
+    if (uploadingFiles) {
+      setSubmitError(
+        "Please wait for all attachments to finish uploading."
+      );
+      return;
+    }
     setIsSubmitting(true);
     try {
       const res = await fetch("/api/requests", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          requestType: "hr-offboarding",
+          requestType: formId,
+
           attachmentIds: attachments
             .map((a) => a.attachmentId)
             .filter(
               (id): id is string =>
                 typeof id === "string" && id.length > 0
             ),
-          title: `Offboarding — ${values.exitEmployeeName || "Employee"}`,
-          description: `Offboarding request for ${values.exitEmployeeName}${
-            values.department ? ` (${values.department})` : ""
-          }.`,
-          priority: "Medium",
+
+          title: values.title,
+          description: values.description?.text ?? "",
+          priority: values.priority,
           department: values.department,
+          requestedFor: values.onBehalf ? values.requestedFor : null,
           assignedTo: values.assignedTo,
           assignedDepartment: values.assignedDepartment,
           approvers: values.approvers,
           followers: values.followers,
           payload: {
-            exitEmployee: values.exitEmployeeName,
-            exitEmployeeEmail: values.exitEmployeeEmail,
-            lanDomainId: values.lanDomainId,
-            employeeCode: values.employeeCode,
-            department: values.department,
-            location: values.location,
-            reportingManager: values.reportingManager,
-            lastWorkingDate: values.lastWorkingDate,
-            emailForwarding: values.emailForwarding,
-            mailboxDelegation: values.mailboxDelegation,
-            oneDriveDelegation: values.oneDriveDelegation,
-            additionalRemarks: values.additionalRemarks,
+            category: values.category,
+            specifyCategory: values.specifyCategory,
+            businessJustification: values.businessJustification,
+            businessImpact: values.businessImpact,
+            urgentReason: values.urgentReason,
+            usersAffected: values.usersAffected,
+            tags: values.tags,
+            descriptionHtml: values.description?.html ?? "",
+            customQuestions: questionAnswers,
+
+            attachments: attachments.map((file) => ({
+              attachmentId: file.attachmentId,
+              name: file.name,
+              size: file.size,
+              type: file.type,
+            })),
           },
         }),
       });
@@ -257,21 +299,13 @@ export function EmployeeOffboardingForm() {
       if (!res.ok || !data.success) {
         throw new Error(data.error ?? "Submission failed");
       }
-      setReferenceId(data.reference);
-      setSubmittedTitle(
-        `Offboarding — ${values.exitEmployeeName || "Employee"}`
-      );
-      try {
-        if (draftStorageKey) localStorage.removeItem(draftStorageKey);
-      } catch {
-        // Ignore storage errors.
-      }
+      setRequestId(data.reference);
+      setSubmittedTitle(values.title);
+      if (draftStorageKey) localStorage.removeItem(draftStorageKey);
       setShowSuccess(true);
     } catch (error) {
-      setAttachmentError(
-        error instanceof Error
-          ? error.message
-          : "Submission failed. Please try again."
+      setSubmitError(
+        error instanceof Error ? error.message : "Submission failed. Please try again."
       );
     } finally {
       setIsSubmitting(false);
@@ -280,381 +314,154 @@ export function EmployeeOffboardingForm() {
 
   return (
     <FormProvider {...methods}>
-      <main className="min-h-screen bg-background pb-4">
-        <form
-          onSubmit={handleSubmit(onSubmit)}
-          noValidate
-          className="mx-auto max-w-6xl px-4 py-6 sm:px-6"
-        >
-          <PageHeader
-            formTitle="Employee Offboarding"
-            formDescription="Request access revocation and mailbox handling for an exiting employee."
-            icon={KeyRound}
-            accent="from-slate-600 to-slate-800 text-white ring-white/15"
-          />
-
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-            {/* Left column (wider) */}
-            <div className="space-y-6 lg:col-span-2">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Exit Employee Details</CardTitle>
-                  <CardDescription>
-                    When you submit this form, the owner will see your name and
-                    email address. Fields marked{" "}
-                    <span className="text-destructive">*</span> are required.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-5">
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <div>
-                      <Label htmlFor="exitEmployeeName" required>
-                        Exit Employee Name
-                      </Label>
-                      <Input
-                        id="exitEmployeeName"
-                        placeholder="Full name of exiting employee"
-                        invalid={!!errors.exitEmployeeName}
-                        {...register("exitEmployeeName")}
-                      />
-                      <FieldError message={errors.exitEmployeeName?.message} />
-                    </div>
-
-                    <div>
-                      <Label htmlFor="exitEmployeeEmail" required>
-                        Exit Employee Email ID
-                      </Label>
-                      <Input
-                        id="exitEmployeeEmail"
-                        placeholder="name@fareportal.com"
-                        invalid={!!errors.exitEmployeeEmail}
-                        {...register("exitEmployeeEmail")}
-                      />
-                      <FieldHint>
-                        For more than one ID, separate the addresses with commas.
-                      </FieldHint>
-                      <FieldError message={errors.exitEmployeeEmail?.message} />
-                    </div>
-
-                    <div>
-                      <Label htmlFor="lanDomainId" required>
-                        LAN/Domain ID
-                      </Label>
-                      <Input
-                        id="lanDomainId"
-                        placeholder="e.g. FP\\jdoe"
-                        invalid={!!errors.lanDomainId}
-                        {...register("lanDomainId")}
-                      />
-                      <FieldError message={errors.lanDomainId?.message} />
-                    </div>
-
-                    <div>
-                      <Label htmlFor="employeeCode" required>
-                        Employee Code
-                      </Label>
-                      <Input
-                        id="employeeCode"
-                        placeholder="e.g. FP12345"
-                        invalid={!!errors.employeeCode}
-                        {...register("employeeCode")}
-                      />
-                      <FieldError message={errors.employeeCode?.message} />
-                    </div>
-
-                    <div>
-                      <Label htmlFor="department" required>
-                        Department
-                      </Label>
-                      <Input
-                        id="department"
-                        placeholder="e.g. IT Engineering"
-                        invalid={!!errors.department}
-                        {...register("department")}
-                      />
-                      <FieldError message={errors.department?.message} />
-                    </div>
-
-                    <div>
-                      <Label htmlFor="location" required>
-                        Location
-                      </Label>
-                      <Input
-                        id="location"
-                        placeholder="e.g. Gurugram"
-                        invalid={!!errors.location}
-                        {...register("location")}
-                      />
-                      <FieldError message={errors.location?.message} />
-                    </div>
-
-                    <div>
-                      <Label htmlFor="reportingManager" required>
-                        Reporting Manager
-                      </Label>
-                      <Input
-                        id="reportingManager"
-                        type="email"
-                        inputMode="email"
-                        placeholder="manager@fareportal.com"
-                        invalid={!!errors.reportingManager}
-                        {...register("reportingManager")}
-                      />
-                      <FieldHint>
-                        Enter the reporting manager&apos;s email address.
-                      </FieldHint>
-                      <FieldError message={errors.reportingManager?.message} />
-                    </div>
-
-                    <div>
-                      <Label htmlFor="lastWorkingDate" required>
-                        Last Working Date
-                      </Label>
-                      <Input
-                        id="lastWorkingDate"
-                        type="date"
-                        invalid={!!errors.lastWorkingDate}
-                        {...register("lastWorkingDate")}
-                      />
-                      <FieldError message={errors.lastWorkingDate?.message} />
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <div id="offboarding-attachments" className="space-y-2">
-                <div>
-                  <Label required>Attachment</Label>
-                  <FieldHint>
-                    Upload the supporting offboarding document (Word, Excel, PPT,
-                    PDF, image, video, or audio).
-                  </FieldHint>
-                </div>
-                <AttachmentsCard
-                  files={attachments}
-                  onChange={(next) => {
-                    setAttachments(next);
-                    if (next.length > 0) setAttachmentError(null);
-                  }}
-                />
-                <FieldError message={attachmentError ?? undefined} />
-              </div>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>Mailbox &amp; Data Handling</CardTitle>
-                  <CardDescription>
-                    Optional handover settings. Forwarding and delegation are set
-                    up for 1 month by default; specify a longer duration if
-                    required.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-5">
-                  <div>
-                    <Label htmlFor="emailForwarding">Email Forwarding</Label>
-                    <Textarea
-                      id="emailForwarding"
-                      rows={2}
-                      maxLength={1000}
-                      placeholder="If yes, enter the target email address (and duration if more than 1 month)."
-                      invalid={!!errors.emailForwarding}
-                      {...register("emailForwarding")}
-                    />
-                    <FieldError message={errors.emailForwarding?.message} />
-                  </div>
-
-                  <div>
-                    <Label htmlFor="mailboxDelegation">
-                      Mailbox Delegation
-                    </Label>
-                    <Textarea
-                      id="mailboxDelegation"
-                      rows={2}
-                      maxLength={1000}
-                      placeholder="If yes, enter the email address to delegate the mailbox to (and duration if more than 1 month)."
-                      invalid={!!errors.mailboxDelegation}
-                      {...register("mailboxDelegation")}
-                    />
-                    <FieldError message={errors.mailboxDelegation?.message} />
-                  </div>
-
-                  <div>
-                    <Label htmlFor="oneDriveDelegation">
-                      OneDrive Delegation
-                    </Label>
-                    <Textarea
-                      id="oneDriveDelegation"
-                      rows={2}
-                      maxLength={1000}
-                      placeholder="If yes, enter the email address to delegate OneDrive to (and duration if more than 1 month)."
-                      invalid={!!errors.oneDriveDelegation}
-                      {...register("oneDriveDelegation")}
-                    />
-                    <FieldError message={errors.oneDriveDelegation?.message} />
-                  </div>
-
-                  <div>
-                    <Label htmlFor="additionalRemarks">
-                      Any Additional Remarks
-                    </Label>
-                    <Textarea
-                      id="additionalRemarks"
-                      rows={3}
-                      maxLength={1000}
-                      placeholder="Add any other details relevant to this offboarding."
-                      invalid={!!errors.additionalRemarks}
-                      {...register("additionalRemarks")}
-                    />
-                    <FieldError message={errors.additionalRemarks?.message} />
-                  </div>
-                </CardContent>
-              </Card>
-
-              <ActivityTabs />
-            </div>
-
-            {/* Right column */}
-            <div className="space-y-6 lg:col-span-1">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Request Information</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <SummaryRow label="Status">
-                    <StatusBadge status="Draft" />
-                  </SummaryRow>
-
-                  <div className="space-y-1 border-t border-border pt-4">
-                    <SummaryRow label="Request Type">
-                      Employee Offboarding
-                    </SummaryRow>
-                    <SummaryRow label="Created Date">
-                      {formatDateTime(createdAt)}
-                    </SummaryRow>
-                    <SummaryRow label="Reference ID">
-                      {referenceId ? (
-                        <span className="font-mono text-primary">
-                          {referenceId}
-                        </span>
-                      ) : (
-                        <span className="italic text-muted-foreground">
-                          Generated after submission
-                        </span>
-                      )}
-                    </SummaryRow>
-                  </div>
-
-                  <div className="space-y-1 border-t border-border pt-4">
-                    <SummaryRow label="Exit Employee">
-                      {exitName || (
-                        <span className="italic text-muted-foreground">
-                          Not entered
-                        </span>
-                      )}
-                    </SummaryRow>
-                    <SummaryRow label="Last Working Date">
-                      {lastWorkingDate || (
-                        <span className="italic text-muted-foreground">
-                          Not set
-                        </span>
-                      )}
-                    </SummaryRow>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-          </div>
-
-          <StickyActionBar
-            onCancel={handleCancel}
-            onSaveDraft={saveDraft}
-            isSubmitting={isSubmitting}
-            draftSaved={draftSaved}
-          />
-        </form>
-
-        {/* Cancel confirmation */}
-        <Dialog
-          open={showCancel}
-          onClose={() => setShowCancel(false)}
-          title="Discard this request?"
-          description="You have unsaved changes. If you leave now, your changes will be lost."
-          footer={
-            <>
-              <Button variant="outline" onClick={() => setShowCancel(false)}>
-                Keep Editing
-              </Button>
-              <Button variant="destructive" onClick={() => router.push("/")}>
-                Discard Changes
-              </Button>
-            </>
-          }
+      <form
+        onSubmit={methods.handleSubmit(onSubmit)}
+        className="mx-auto max-w-6xl px-4 py-6 sm:px-6"
+      >
+        <PageHeader
+          formTitle={formTitle}
+          formDescription={formDescription}
         />
 
-        {/* Success message */}
-        <Dialog
-          open={showSuccess}
-          onClose={() => setShowSuccess(false)}
-          title="Request submitted"
-          hideClose
-          footer={
-            <>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setShowSuccess(false);
-                  reset(defaultValues);
-                  setReferenceId(null);
-                  setAttachments([]);
-                  setAttachmentError(null);
-                }}
-              >
-                Create Another
-              </Button>
-              <Button
-                variant="success"
-                onClick={() =>
-                  router.push(
-                    `/requests/${encodeURIComponent(referenceId ?? "")}`
-                  )
-                }
-              >
-                View Request
-              </Button>
-            </>
-          }
-        >
-          <div className="space-y-4">
-            <div className="flex flex-col items-center gap-3 text-center">
-              <CheckCircle2 className="h-12 w-12 text-success" />
-              <h3 className="text-lg font-semibold">
-                Request Submitted Successfully
-              </h3>
-              <p className="text-sm text-muted-foreground">
-                Your request has been created and is now available for tracking.
-              </p>
-            </div>
-            <div className="rounded-lg border border-border bg-muted/40 p-4">
-              <div className="grid gap-2 text-sm">
-                <div>
-                  <span className="font-medium">Request ID:</span>{" "}
-                  {referenceId}
-                </div>
-                <div>
-                  <span className="font-medium">Title:</span> {submittedTitle}
-                </div>
-                <div>
-                  <span className="font-medium">Status:</span> New
-                </div>
-                <div>
-                  <span className="font-medium">Created:</span>{" "}
-                  {new Date().toLocaleString()}
-                </div>
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          {/* Left column (wider) */}
+          <div className="space-y-6 lg:col-span-2">
+            <RequesterInformationCard />
+            <RequestDetailsCard />
+            <CustomQuestionsCard
+              questions={questions}
+              answers={questionAnswers}
+              errors={questionErrors}
+              onAnswerChange={handleQuestionAnswerChange}
+            />
+            <AttachmentsCard files={attachments} onChange={setAttachments} />
+            <ActivityTabs />
+          </div>
+
+          {/* Right column */}
+          <div className="space-y-6 lg:col-span-1">
+            <RequestInformationCard
+              createdAt={createdAt}
+              requestId={requestId}
+            />
+          </div>
+        </div>
+
+        <StickyActionBar
+          onCancel={handleCancel}
+          onSaveDraft={saveDraft}
+          isSubmitting={isSubmitting}
+          draftSaved={draftSaved}
+        />
+      </form>
+
+      {/* Cancel confirmation */}
+      <Dialog
+        open={showCancel}
+        onClose={() => setShowCancel(false)}
+        title="Discard this request?"
+        description="You have unsaved changes. If you leave now, your changes will be lost."
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setShowCancel(false)}>
+              Keep Editing
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => router.push("/")}
+            >
+              Discard Changes
+            </Button>
+          </>
+        }
+      />
+
+      {/* Success message */}
+      <Dialog
+        open={showSuccess}
+        onClose={() => setShowSuccess(false)}
+        title="Request submitted"
+        hideClose
+        footer={
+          <>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowSuccess(false);
+                methods.reset(defaultValues);
+                setAttachments([]);
+                setRequestId(null);
+                setQuestionAnswers(
+                  normalizeRequestQuestionAnswers(questions, {})
+                );
+                setQuestionErrors({});
+              }}
+            >
+              Create Another
+            </Button>
+            <Button
+              variant="success"
+              onClick={() =>
+                router.push(
+                  `/requests/${encodeURIComponent(requestId ?? "")}`
+                )
+              }
+            >
+              View Request
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="flex flex-col items-center gap-3 text-center">
+            <CheckCircle2 className="h-12 w-12 text-success" />
+
+            <h3 className="text-lg font-semibold">
+              Request Submitted Successfully
+            </h3>
+
+            <p className="text-sm text-muted-foreground">
+              Your request has been created and is now available for tracking.
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-border bg-muted/40 p-4">
+            <div className="grid gap-2 text-sm">
+              <div>
+                <span className="font-medium">Request ID:</span>{" "}
+                {requestId}
+              </div>
+
+              <div>
+                <span className="font-medium">Title:</span>{" "}
+                {submittedTitle}
+              </div>
+
+              <div>
+                <span className="font-medium">Status:</span> New
+              </div>
+
+              <div>
+                <span className="font-medium">Created:</span>{" "}
+                {new Date().toLocaleString()}
               </div>
             </div>
           </div>
-        </Dialog>
-      </main>
+        </div>
+      </Dialog>
+
+      {/* Submission error */}
+      <Dialog
+        open={!!submitError}
+        onClose={() => setSubmitError(null)}
+        title="Submission failed"
+        description={submitError ?? undefined}
+        footer={
+          <Button variant="outline" onClick={() => setSubmitError(null)}>
+            Close
+          </Button>
+        }
+      />
     </FormProvider>
   );
 }
