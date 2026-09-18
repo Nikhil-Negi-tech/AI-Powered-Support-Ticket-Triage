@@ -1,11 +1,11 @@
 "use client";
 
 import * as React from "react";
+import { FormProvider, useForm } from "react-hook-form";
 import { useRouter } from "next/navigation";
-import { Controller, FormProvider, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { CheckCircle2, UserPlus } from "lucide-react";
+import { CheckCircle2, KeyRound } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -14,13 +14,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
-import { Checkbox } from "@/components/ui/checkbox";
 import { FieldError, FieldHint } from "@/components/ui/field";
 import { StatusBadge } from "@/components/ui/status-badges";
-import { cn, formatDateTime, todayISO } from "@/lib/utils";
+import { formatDateTime } from "@/lib/utils";
 import type { AttachmentMeta } from "@/lib/types";
 import { PageHeader } from "@/components/general-request/PageHeader";
 import { StickyActionBar } from "@/components/general-request/StickyActionBar";
@@ -28,23 +28,8 @@ import { AttachmentsCard } from "@/components/general-request/AttachmentsCard";
 import { ActivityTabs } from "@/components/general-request/ActivityTabs";
 import { useCurrentUser } from "@/components/hooks/useCurrentUser";
 
-const EMPLOYEE_TYPES = ["Consultant", "Full Time"] as const;
-const ASSET_DISPATCH_OPTIONS = ["Yes", "No"] as const;
-const ACCESS_OPTIONS = [
-  "Domain ID",
-  "Nice ID",
-  "TMS ID",
-  "Amadeus ID",
-  "Sabre ID",
-  "Farelogix",
-  "OBE Access",
-  "OAP Access",
-  "One Terminal",
-  "PK fare",
-  "None",
-] as const;
-
-const DRAFT_STORAGE_KEY = "itsm.hr-onboarding.draft.v1";
+const DRAFT_STORAGE_KEY = "itsm.hr-offboarding.draft.v1";
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const personSchema = z.object({
   id: z.string(),
@@ -53,30 +38,35 @@ const personSchema = z.object({
   department: z.string(),
 });
 
-const onboardingSchema = z.object({
-  name: z.string().trim().min(2, "Name is required"),
-  dateOfJoining: z.string().trim().min(1, "Date of joining is required"),
-  employeeType: z
-    .string()
-    .refine((value) => (EMPLOYEE_TYPES as readonly string[]).includes(value), {
-      message: "Select an employee type",
-    }),
-  designation: z.string().trim().min(1, "Designation is required"),
-  department: z.string().trim().min(1, "Department is required"),
-  supervisorIndia: z.string().trim().min(1, "Supervisor (India) is required"),
-  supervisorUS: z.string().trim().optional().default(""),
-  proposedEmail: z
+const offboardingSchema = z.object({
+  exitEmployeeName: z.string().trim().min(2, "Exit employee name is required"),
+  exitEmployeeEmail: z
     .string()
     .trim()
-    .min(1, "Proposed email ID is required"),
-  defaultDLs: z.string().trim().optional().default(""),
-  assetDispatch: z
-    .string()
+    .min(1, "Exit employee email ID is required")
     .refine(
-      (value) => (ASSET_DISPATCH_OPTIONS as readonly string[]).includes(value),
-      { message: "Select an option" }
+      (value) =>
+        value
+          .split(",")
+          .map((email) => email.trim())
+          .filter(Boolean)
+          .every((email) => EMAIL_REGEX.test(email)),
+      { message: "Enter valid email address(es), separated by commas" }
     ),
-  accessRequired: z.array(z.string()).default([]),
+  lanDomainId: z.string().trim().min(1, "LAN/Domain ID is required"),
+  employeeCode: z.string().trim().min(1, "Employee code is required"),
+  department: z.string().trim().min(1, "Department is required"),
+  location: z.string().trim().min(1, "Location is required"),
+  reportingManager: z
+    .string()
+    .trim()
+    .min(1, "Reporting manager email is required")
+    .regex(EMAIL_REGEX, "Enter a valid email address"),
+  lastWorkingDate: z.string().trim().min(1, "Last working date is required"),
+  emailForwarding: z.string().trim().max(1000).optional().default(""),
+  mailboxDelegation: z.string().trim().max(1000).optional().default(""),
+  oneDriveDelegation: z.string().trim().max(1000).optional().default(""),
+  additionalRemarks: z.string().trim().max(1000).optional().default(""),
 
   // Assignment and tracking
   assignedDepartment: z.string().default("Service Desk"),
@@ -99,20 +89,21 @@ const onboardingSchema = z.object({
     .default([]),
 });
 
-type OnboardingValues = z.infer<typeof onboardingSchema>;
+type OffboardingValues = z.infer<typeof offboardingSchema>;
 
-const defaultValues: OnboardingValues = {
-  name: "",
-  dateOfJoining: "",
-  employeeType: "",
-  designation: "",
+const defaultValues: OffboardingValues = {
+  exitEmployeeName: "",
+  exitEmployeeEmail: "",
+  lanDomainId: "",
+  employeeCode: "",
   department: "",
-  supervisorIndia: "",
-  supervisorUS: "",
-  proposedEmail: "",
-  defaultDLs: "",
-  assetDispatch: "",
-  accessRequired: [],
+  location: "",
+  reportingManager: "",
+  lastWorkingDate: "",
+  emailForwarding: "",
+  mailboxDelegation: "",
+  oneDriveDelegation: "",
+  additionalRemarks: "",
   assignedDepartment: "Service Desk",
   assignedTo: null,
   followers: [],
@@ -122,7 +113,7 @@ const defaultValues: OnboardingValues = {
 
 function generateReferenceId(): string {
   const n = Math.floor(Math.random() * 900000) + 100;
-  return `ONB-${String(n).padStart(6, "0")}`;
+  return `OFB-${String(n).padStart(6, "0")}`;
 }
 
 function SummaryRow({
@@ -142,50 +133,7 @@ function SummaryRow({
   );
 }
 
-function RadioGroup({
-  name,
-  options,
-  value,
-  invalid,
-  register,
-}: {
-  name: keyof OnboardingValues;
-  options: readonly string[];
-  value: string;
-  invalid?: boolean;
-  register: ReturnType<typeof useForm<OnboardingValues>>["register"];
-}) {
-  return (
-    <div className="mt-1 grid gap-2 sm:grid-cols-2">
-      {options.map((option) => {
-        const checked = value === option;
-        return (
-          <label
-            key={option}
-            className={cn(
-              "flex cursor-pointer items-center gap-3 rounded-md border px-4 py-3 text-sm shadow-sm transition-colors",
-              checked
-                ? "border-primary bg-primary/5 ring-1 ring-primary"
-                : invalid
-                ? "border-destructive bg-card"
-                : "border-input bg-card hover:bg-secondary"
-            )}
-          >
-            <input
-              type="radio"
-              value={option}
-              className="h-4 w-4 accent-blue-600"
-              {...register(name)}
-            />
-            <span className="font-medium text-foreground">{option}</span>
-          </label>
-        );
-      })}
-    </div>
-  );
-}
-
-export function StaffOnboardingForm() {
+export function EmployeeOffboardingForm() {
   const router = useRouter();
   const createdAt = React.useMemo(() => new Date(), []);
   const { user: currentUser } = useCurrentUser();
@@ -193,8 +141,8 @@ export function StaffOnboardingForm() {
     ? `${DRAFT_STORAGE_KEY}.${currentUser.id}`
     : null;
 
-  const methods = useForm<OnboardingValues>({
-    resolver: zodResolver(onboardingSchema),
+  const methods = useForm<OffboardingValues>({
+    resolver: zodResolver(offboardingSchema),
     defaultValues,
     mode: "onBlur",
   });
@@ -204,7 +152,6 @@ export function StaffOnboardingForm() {
     watch,
     reset,
     getValues,
-    control,
     formState: { errors, isDirty },
   } = methods;
 
@@ -219,8 +166,8 @@ export function StaffOnboardingForm() {
     null
   );
 
-  const employeeType = watch("employeeType");
-  const assetDispatch = watch("assetDispatch");
+  const exitName = watch("exitEmployeeName");
+  const lastWorkingDate = watch("lastWorkingDate");
 
   React.useEffect(() => {
     if (!draftStorageKey) return;
@@ -255,12 +202,12 @@ export function StaffOnboardingForm() {
     }
   };
 
-  const onSubmit = async (values: OnboardingValues) => {
+  const onSubmit = async (values: OffboardingValues) => {
     if (attachments.length === 0) {
-      setAttachmentError("Attach the required onboarding document.");
+      setAttachmentError("Attach the required offboarding document.");
       requestAnimationFrame(() => {
         document
-          .getElementById("onboarding-attachments")
+          .getElementById("offboarding-attachments")
           ?.scrollIntoView({ behavior: "smooth", block: "center" });
       });
       return;
@@ -273,16 +220,16 @@ export function StaffOnboardingForm() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          requestType: "hr-onboarding",
+          requestType: "hr-offboarding",
           attachmentIds: attachments
             .map((a) => a.attachmentId)
             .filter(
               (id): id is string =>
                 typeof id === "string" && id.length > 0
             ),
-          title: `Onboarding — ${values.name || "New Joiner"}`,
-          description: `Onboarding request for ${values.name}${
-            values.designation ? ` (${values.designation})` : ""
+          title: `Offboarding — ${values.exitEmployeeName || "Employee"}`,
+          description: `Offboarding request for ${values.exitEmployeeName}${
+            values.department ? ` (${values.department})` : ""
           }.`,
           priority: "Medium",
           department: values.department,
@@ -291,19 +238,18 @@ export function StaffOnboardingForm() {
           approvers: values.approvers,
           followers: values.followers,
           payload: {
-            newJoiner: values.name,
-            dateOfJoining: values.dateOfJoining,
-            employeeType: values.employeeType,
-            designation: values.designation,
+            exitEmployee: values.exitEmployeeName,
+            exitEmployeeEmail: values.exitEmployeeEmail,
+            lanDomainId: values.lanDomainId,
+            employeeCode: values.employeeCode,
             department: values.department,
-            supervisorIndia: values.supervisorIndia,
-            supervisorUS: values.supervisorUS,
-            proposedEmail: values.proposedEmail,
-            defaultDLs: values.defaultDLs,
-            assetDispatch: values.assetDispatch,
-            accessRequired: Array.isArray(values.accessRequired)
-              ? values.accessRequired.join(", ")
-              : values.accessRequired,
+            location: values.location,
+            reportingManager: values.reportingManager,
+            lastWorkingDate: values.lastWorkingDate,
+            emailForwarding: values.emailForwarding,
+            mailboxDelegation: values.mailboxDelegation,
+            oneDriveDelegation: values.oneDriveDelegation,
+            additionalRemarks: values.additionalRemarks,
           },
         }),
       });
@@ -312,7 +258,9 @@ export function StaffOnboardingForm() {
         throw new Error(data.error ?? "Submission failed");
       }
       setReferenceId(data.reference);
-      setSubmittedTitle(`Onboarding — ${values.name || "New Joiner"}`);
+      setSubmittedTitle(
+        `Offboarding — ${values.exitEmployeeName || "Employee"}`
+      );
       try {
         if (draftStorageKey) localStorage.removeItem(draftStorageKey);
       } catch {
@@ -339,10 +287,10 @@ export function StaffOnboardingForm() {
           className="mx-auto max-w-6xl px-4 py-6 sm:px-6"
         >
           <PageHeader
-            formTitle="Staff Onboarding"
-            formDescription="Request onboarding, access, and asset provisioning for a new joiner."
-            icon={UserPlus}
-            accent="from-violet-500 to-violet-700 text-white ring-white/20"
+            formTitle="Employee Offboarding"
+            formDescription="Request access revocation and mailbox handling for an exiting employee."
+            icon={KeyRound}
+            accent="from-slate-600 to-slate-800 text-white ring-white/15"
           />
 
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -350,7 +298,7 @@ export function StaffOnboardingForm() {
             <div className="space-y-6 lg:col-span-2">
               <Card>
                 <CardHeader>
-                  <CardTitle>New Staff Onboarding Request</CardTitle>
+                  <CardTitle>Exit Employee Details</CardTitle>
                   <CardDescription>
                     When you submit this form, the owner will see your name and
                     email address. Fields marked{" "}
@@ -360,57 +308,58 @@ export function StaffOnboardingForm() {
                 <CardContent className="space-y-5">
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div>
-                      <Label htmlFor="name" required>
-                        Name
+                      <Label htmlFor="exitEmployeeName" required>
+                        Exit Employee Name
                       </Label>
                       <Input
-                        id="name"
-                        placeholder="New joiner's full name"
-                        invalid={!!errors.name}
-                        {...register("name")}
+                        id="exitEmployeeName"
+                        placeholder="Full name of exiting employee"
+                        invalid={!!errors.exitEmployeeName}
+                        {...register("exitEmployeeName")}
                       />
-                      <FieldError message={errors.name?.message} />
+                      <FieldError message={errors.exitEmployeeName?.message} />
                     </div>
 
                     <div>
-                      <Label htmlFor="dateOfJoining" required>
-                        Date of Joining
+                      <Label htmlFor="exitEmployeeEmail" required>
+                        Exit Employee Email ID
                       </Label>
                       <Input
-                        id="dateOfJoining"
-                        type="date"
-                        min={todayISO()}
-                        invalid={!!errors.dateOfJoining}
-                        {...register("dateOfJoining")}
+                        id="exitEmployeeEmail"
+                        placeholder="name@fareportal.com"
+                        invalid={!!errors.exitEmployeeEmail}
+                        {...register("exitEmployeeEmail")}
                       />
-                      <FieldError message={errors.dateOfJoining?.message} />
+                      <FieldHint>
+                        For more than one ID, separate the addresses with commas.
+                      </FieldHint>
+                      <FieldError message={errors.exitEmployeeEmail?.message} />
                     </div>
-                  </div>
 
-                  <div>
-                    <Label required>Employee Type</Label>
-                    <RadioGroup
-                      name="employeeType"
-                      options={EMPLOYEE_TYPES}
-                      value={employeeType}
-                      invalid={!!errors.employeeType}
-                      register={register}
-                    />
-                    <FieldError message={errors.employeeType?.message} />
-                  </div>
-
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div>
-                      <Label htmlFor="designation" required>
-                        Designation
+                      <Label htmlFor="lanDomainId" required>
+                        LAN/Domain ID
                       </Label>
                       <Input
-                        id="designation"
-                        placeholder="e.g. Senior Engineer"
-                        invalid={!!errors.designation}
-                        {...register("designation")}
+                        id="lanDomainId"
+                        placeholder="e.g. FP\\jdoe"
+                        invalid={!!errors.lanDomainId}
+                        {...register("lanDomainId")}
                       />
-                      <FieldError message={errors.designation?.message} />
+                      <FieldError message={errors.lanDomainId?.message} />
+                    </div>
+
+                    <div>
+                      <Label htmlFor="employeeCode" required>
+                        Employee Code
+                      </Label>
+                      <Input
+                        id="employeeCode"
+                        placeholder="e.g. FP12345"
+                        invalid={!!errors.employeeCode}
+                        {...register("employeeCode")}
+                      />
+                      <FieldError message={errors.employeeCode?.message} />
                     </div>
 
                     <div>
@@ -427,129 +376,57 @@ export function StaffOnboardingForm() {
                     </div>
 
                     <div>
-                      <Label htmlFor="supervisorIndia" required>
-                        Supervisor (India)
+                      <Label htmlFor="location" required>
+                        Location
                       </Label>
                       <Input
-                        id="supervisorIndia"
-                        placeholder="Reporting supervisor in India"
-                        invalid={!!errors.supervisorIndia}
-                        {...register("supervisorIndia")}
+                        id="location"
+                        placeholder="e.g. Gurugram"
+                        invalid={!!errors.location}
+                        {...register("location")}
                       />
-                      <FieldError message={errors.supervisorIndia?.message} />
+                      <FieldError message={errors.location?.message} />
                     </div>
 
                     <div>
-                      <Label htmlFor="supervisorUS">Supervisor (US)</Label>
-                      <Input
-                        id="supervisorUS"
-                        placeholder="Reporting supervisor in US"
-                        invalid={!!errors.supervisorUS}
-                        {...register("supervisorUS")}
-                      />
-                      <FieldError message={errors.supervisorUS?.message} />
-                    </div>
-
-                    <div>
-                      <Label htmlFor="proposedEmail" required>
-                        New Joiner Proposed Email ID
+                      <Label htmlFor="reportingManager" required>
+                        Reporting Manager
                       </Label>
                       <Input
-                        id="proposedEmail"
-                        placeholder="proposed.name@fareportal.com"
-                        invalid={!!errors.proposedEmail}
-                        {...register("proposedEmail")}
-                      />
-                      <FieldError message={errors.proposedEmail?.message} />
-                    </div>
-
-                    <div>
-                      <Label htmlFor="defaultDLs">Default DLs Email ID</Label>
-                      <Input
-                        id="defaultDLs"
-                        placeholder="e.g. Team India, HOD India"
-                        invalid={!!errors.defaultDLs}
-                        {...register("defaultDLs")}
+                        id="reportingManager"
+                        type="email"
+                        inputMode="email"
+                        placeholder="manager@fareportal.com"
+                        invalid={!!errors.reportingManager}
+                        {...register("reportingManager")}
                       />
                       <FieldHint>
-                        Distribution lists the new joiner should be added to.
+                        Enter the reporting manager&apos;s email address.
                       </FieldHint>
-                      <FieldError message={errors.defaultDLs?.message} />
+                      <FieldError message={errors.reportingManager?.message} />
                     </div>
-                  </div>
 
-                  <div>
-                    <Label required>If asset needs to be dispatched</Label>
-                    <RadioGroup
-                      name="assetDispatch"
-                      options={ASSET_DISPATCH_OPTIONS}
-                      value={assetDispatch}
-                      invalid={!!errors.assetDispatch}
-                      register={register}
-                    />
-                    <FieldError message={errors.assetDispatch?.message} />
-                  </div>
-
-                  <div>
-                    <Label>Access Required to be given</Label>
-                    <Controller
-                      control={control}
-                      name="accessRequired"
-                      render={({ field }) => {
-                        const selected = field.value ?? [];
-                        const toggle = (option: string) => {
-                          if (option === "None") {
-                            field.onChange(
-                              selected.includes("None") ? [] : ["None"]
-                            );
-                            return;
-                          }
-                          const withoutNone = selected.filter(
-                            (item) => item !== "None"
-                          );
-                          field.onChange(
-                            withoutNone.includes(option)
-                              ? withoutNone.filter((item) => item !== option)
-                              : [...withoutNone, option]
-                          );
-                        };
-                        return (
-                          <div className="mt-1 grid gap-2 sm:grid-cols-2">
-                            {ACCESS_OPTIONS.map((option) => {
-                              const checked = selected.includes(option);
-                              return (
-                                <label
-                                  key={option}
-                                  className={cn(
-                                    "flex cursor-pointer items-center gap-3 rounded-md border px-4 py-2.5 text-sm shadow-sm transition-colors",
-                                    checked
-                                      ? "border-primary bg-primary/5"
-                                      : "border-input bg-card hover:bg-secondary"
-                                  )}
-                                >
-                                  <Checkbox
-                                    checked={checked}
-                                    onCheckedChange={() => toggle(option)}
-                                  />
-                                  <span className="font-medium text-foreground">
-                                    {option}
-                                  </span>
-                                </label>
-                              );
-                            })}
-                          </div>
-                        );
-                      }}
-                    />
+                    <div>
+                      <Label htmlFor="lastWorkingDate" required>
+                        Last Working Date
+                      </Label>
+                      <Input
+                        id="lastWorkingDate"
+                        type="date"
+                        invalid={!!errors.lastWorkingDate}
+                        {...register("lastWorkingDate")}
+                      />
+                      <FieldError message={errors.lastWorkingDate?.message} />
+                    </div>
                   </div>
                 </CardContent>
               </Card>
 
-              <div id="onboarding-attachments" className="space-y-2">
+              <div id="offboarding-attachments" className="space-y-2">
                 <div>
                   <Label required>Attachment</Label>
                   <FieldHint>
-                    Upload the supporting onboarding document (Word, Excel, PPT,
+                    Upload the supporting offboarding document (Word, Excel, PPT,
                     PDF, image, video, or audio).
                   </FieldHint>
                 </div>
@@ -562,6 +439,76 @@ export function StaffOnboardingForm() {
                 />
                 <FieldError message={attachmentError ?? undefined} />
               </div>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Mailbox &amp; Data Handling</CardTitle>
+                  <CardDescription>
+                    Optional handover settings. Forwarding and delegation are set
+                    up for 1 month by default; specify a longer duration if
+                    required.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-5">
+                  <div>
+                    <Label htmlFor="emailForwarding">Email Forwarding</Label>
+                    <Textarea
+                      id="emailForwarding"
+                      rows={2}
+                      maxLength={1000}
+                      placeholder="If yes, enter the target email address (and duration if more than 1 month)."
+                      invalid={!!errors.emailForwarding}
+                      {...register("emailForwarding")}
+                    />
+                    <FieldError message={errors.emailForwarding?.message} />
+                  </div>
+
+                  <div>
+                    <Label htmlFor="mailboxDelegation">
+                      Mailbox Delegation
+                    </Label>
+                    <Textarea
+                      id="mailboxDelegation"
+                      rows={2}
+                      maxLength={1000}
+                      placeholder="If yes, enter the email address to delegate the mailbox to (and duration if more than 1 month)."
+                      invalid={!!errors.mailboxDelegation}
+                      {...register("mailboxDelegation")}
+                    />
+                    <FieldError message={errors.mailboxDelegation?.message} />
+                  </div>
+
+                  <div>
+                    <Label htmlFor="oneDriveDelegation">
+                      OneDrive Delegation
+                    </Label>
+                    <Textarea
+                      id="oneDriveDelegation"
+                      rows={2}
+                      maxLength={1000}
+                      placeholder="If yes, enter the email address to delegate OneDrive to (and duration if more than 1 month)."
+                      invalid={!!errors.oneDriveDelegation}
+                      {...register("oneDriveDelegation")}
+                    />
+                    <FieldError message={errors.oneDriveDelegation?.message} />
+                  </div>
+
+                  <div>
+                    <Label htmlFor="additionalRemarks">
+                      Any Additional Remarks
+                    </Label>
+                    <Textarea
+                      id="additionalRemarks"
+                      rows={3}
+                      maxLength={1000}
+                      placeholder="Add any other details relevant to this offboarding."
+                      invalid={!!errors.additionalRemarks}
+                      {...register("additionalRemarks")}
+                    />
+                    <FieldError message={errors.additionalRemarks?.message} />
+                  </div>
+                </CardContent>
+              </Card>
 
               <ActivityTabs />
             </div>
@@ -579,7 +526,7 @@ export function StaffOnboardingForm() {
 
                   <div className="space-y-1 border-t border-border pt-4">
                     <SummaryRow label="Request Type">
-                      Staff Onboarding
+                      Employee Offboarding
                     </SummaryRow>
                     <SummaryRow label="Created Date">
                       {formatDateTime(createdAt)}
@@ -598,17 +545,17 @@ export function StaffOnboardingForm() {
                   </div>
 
                   <div className="space-y-1 border-t border-border pt-4">
-                    <SummaryRow label="Employee Type">
-                      {employeeType || (
+                    <SummaryRow label="Exit Employee">
+                      {exitName || (
                         <span className="italic text-muted-foreground">
-                          Not selected
+                          Not entered
                         </span>
                       )}
                     </SummaryRow>
-                    <SummaryRow label="Asset Dispatch">
-                      {assetDispatch || (
+                    <SummaryRow label="Last Working Date">
+                      {lastWorkingDate || (
                         <span className="italic text-muted-foreground">
-                          Not selected
+                          Not set
                         </span>
                       )}
                     </SummaryRow>
