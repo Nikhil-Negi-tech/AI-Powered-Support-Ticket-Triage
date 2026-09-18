@@ -1,167 +1,53 @@
 "use client";
 
 import * as React from "react";
-import {
-  Activity,
-  Bell,
-  BookOpen,
-  BriefcaseBusiness,
-  CheckCircle2,
-  ChevronRight,
-  ClipboardList,
-  FileBarChart,
-  GitBranch,
-  LayoutDashboard,
-  Plus,
-  Settings2,
-  ShieldCheck,
-  SlidersHorizontal,
-  Users,
-  Workflow,
-} from "lucide-react";
-import { AdminManager } from "@/components/admin/AdminManager";
-import { UserManagementPanel } from "@/components/admin/UserManagementPanel";
-import { RequestFormManager } from "@/components/admin/RequestFormManager";
-import { MetadataManager } from "@/components/admin/MetadataManager";
+import { Plus, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 
-type Section = "overview" | "directory" | "approvals" | "forms" | "business" | "workflows" | "notifications" | "reports" | "audit" | "settings" | "access";
+type Resource = "form" | "workflow" | "notification" | "report" | "setting" | "feature";
+type Item = { id?: string; name?: string; form_key?: string; workflow_key?: string; event_key?: string; report_key?: string; setting_key?: string; flag_key?: string; status?: string; enabled?: boolean; definition?: unknown };
 
-interface ConfigurationData {
-  departments: Array<{ id: string; name: string; code: string; is_active: boolean }>;
-  categories: Array<{ id: string; name: string; slug: string; is_active: boolean }>;
-  policies: Array<{ id: string; name: string; request_type: string; steps: Array<{ name: string; approver_type: string; approver_value: string }> }>;
-  permissions: Array<{ role: string; permission: string; granted: boolean }>;
-  counts: { users: number; departments: number; policies: number; audits: number };
-}
+const RESOURCE_COPY: Record<Resource, { title: string; key: string; name: string }> = {
+  form: { title: "Database-backed request forms", key: "Form key", name: "Form name" },
+  workflow: { title: "Workflow definitions", key: "Workflow key", name: "Workflow name" },
+  notification: { title: "Notification events", key: "Event key", name: "Event name" },
+  report: { title: "Saved reports", key: "Report key", name: "Report name" },
+  setting: { title: "Portal settings", key: "Setting key", name: "Value" },
+  feature: { title: "Feature flags", key: "Flag key", name: "Description" },
+};
 
-const NAV: Array<{ id: Section; label: string; description: string; icon: typeof Users }> = [
-  { id: "overview", label: "Overview", description: "System health and administration activity", icon: LayoutDashboard },
-  { id: "directory", label: "Users & Directory", description: "Entra users, roles and department ownership", icon: Users },
-  { id: "approvals", label: "Approvals", description: "Approval policies, delegates and simulation", icon: CheckCircle2 },
-  { id: "forms", label: "Request Forms", description: "Form catalog and versioned field definitions", icon: ClipboardList },
-  { id: "business", label: "Departments & Categories", description: "Business taxonomy used by request forms", icon: BookOpen },
-  { id: "workflows", label: "Workflows", description: "Status, assignment and escalation rules", icon: GitBranch },
-  { id: "notifications", label: "Notifications", description: "Events, channels and message templates", icon: Bell },
-  { id: "reports", label: "Reports & Export", description: "Saved reports, schedules and exports", icon: FileBarChart },
-  { id: "audit", label: "Audit Logs", description: "Administrative change history", icon: Activity },
-  { id: "settings", label: "Portal Settings", description: "Branding, defaults and feature flags", icon: Settings2 },
-  { id: "access", label: "Access Control", description: "Roles and configurable permissions", icon: ShieldCheck },
-];
-
-export function AdministrationCenter({ analytics }: { analytics: { total: number; open: number; urgent: number; byStatus: Record<string, number> } }) {
-  const [section, setSection] = React.useState<Section>("overview");
-  const [data, setData] = React.useState<ConfigurationData | null>(null);
-  const [error, setError] = React.useState("");
-  const [refresh, setRefresh] = React.useState(0);
-
-  React.useEffect(() => {
-    fetch("/api/admin/configuration")
-      .then(async (response) => {
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.error ?? "Unable to load administration configuration");
-        setData(body);
-      })
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Unable to load administration configuration"));
-  }, [refresh]);
-
-  const current = NAV.find((item) => item.id === section) ?? NAV[0];
-
-  return (
-    <main className="min-h-screen bg-background">
-      <div className="mx-auto max-w-[1500px] px-4 py-6 sm:px-6 lg:px-8">
-        <header className="mb-6 flex flex-col gap-4 border-b border-border pb-6 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-primary">
-              <ShieldCheck className="h-4 w-4" /> Administration Center
-            </div>
-            <h1 className="text-3xl font-semibold tracking-tight text-foreground">Control the service experience</h1>
-            <p className="mt-2 max-w-2xl text-sm text-muted-foreground">Configure identity, request intake, approvals, routing, communications and governance from one auditable workspace.</p>
-          </div>
-          <Badge variant="success" className="w-fit gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-current" /> Configuration services online</Badge>
-        </header>
-
-        {error && <p className="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</p>}
-
-        <div className="grid gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
-          <aside className="space-y-1 lg:sticky lg:top-4 lg:self-start">
-            <p className="mb-3 px-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Administration</p>
-            {NAV.map((item) => {
-              const Icon = item.icon;
-              const active = item.id === section;
-              return <button key={item.id} type="button" onClick={() => setSection(item.id)} className={`flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition-colors ${active ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-secondary hover:text-foreground"}`}>
-                <Icon className="h-4 w-4 shrink-0" />
-                <span className="min-w-0 flex-1"><span className="block text-sm font-medium">{item.label}</span><span className={`mt-0.5 block truncate text-xs ${active ? "text-primary-foreground/75" : "text-muted-foreground"}`}>{item.description}</span></span>
-                {active && <ChevronRight className="h-4 w-4 shrink-0" />}
-              </button>;
-            })}
-          </aside>
-
-          <section className="min-w-0">
-            <div className="mb-5 flex items-start justify-between gap-4"><div><p className="text-xs font-semibold uppercase tracking-wide text-primary">{current.label}</p><h2 className="mt-1 text-xl font-semibold text-foreground">{current.description}</h2></div><SlidersHorizontal className="mt-1 h-5 w-5 text-muted-foreground" /></div>
-            {section === "overview" && <Overview analytics={analytics} data={data} onNavigate={setSection} />}
-            {section === "directory" && <><UserManagementPanel /><AdminManager /></>}
-            {section === "forms" && <RequestFormManager />}
-            {section === "business" && <BusinessConfiguration data={data} onSaved={() => setRefresh((value) => value + 1)} />}
-            {section === "approvals" && <ApprovalConfiguration data={data} onSaved={() => setRefresh((value) => value + 1)} />}
-            {section === "audit" && <AuditPanel refresh={refresh} />}
-            {section === "workflows" && <MetadataManager resource="workflow" />}
-            {section === "notifications" && <MetadataManager resource="notification" />}
-            {section === "reports" && <div className="space-y-4"><div className="flex justify-end"><a href="/api/admin/reports/export" className="inline-flex h-10 items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-blue-700">Export requests CSV</a></div><MetadataManager resource="report" /></div>}
-            {section === "settings" && <div className="space-y-6"><MetadataManager resource="setting" /><MetadataManager resource="feature" /></div>}
-            {section === "access" && <AccessPanel data={data} />}
-          </section>
-        </div>
-      </div>
-    </main>
-  );
-}
-
-function Overview({ analytics, data, onNavigate }: { analytics: { total: number; open: number; urgent: number; byStatus: Record<string, number> }; data: ConfigurationData | null; onNavigate: (section: Section) => void }) {
-  const metrics = [
-    ["Active users", data?.counts.users ?? "—", Users, "directory" as Section],
-    ["Open requests", analytics.open, BriefcaseBusiness, "reports" as Section],
-    ["Pending approvals", analytics.byStatus["Approval Pending"] ?? 0, CheckCircle2, "approvals" as Section],
-    ["Approval policies", data?.counts.policies ?? "—", Workflow, "approvals" as Section],
-    ["Audit events", data?.counts.audits ?? "—", Activity, "audit" as Section],
-  ] as const;
-  return <div className="space-y-6">
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{metrics.map(([label, value, Icon, target]) => <button type="button" key={label} onClick={() => onNavigate(target)} className="rounded-lg border border-border bg-card p-4 text-left shadow-sm transition-colors hover:border-primary/40 hover:bg-accent"><Icon className="h-4 w-4 text-primary" /><p className="mt-4 text-2xl font-semibold text-foreground">{value}</p><p className="mt-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</p></button>)}</div>
-    <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
-      <Card><CardHeader><CardTitle>Administration operating model</CardTitle></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2">{NAV.slice(1, 9).map((item) => { const Icon = item.icon; return <button type="button" key={item.id} onClick={() => onNavigate(item.id)} className="flex items-start gap-3 rounded-md border border-border p-3 text-left hover:bg-secondary"><Icon className="mt-0.5 h-4 w-4 text-primary" /><span><span className="block text-sm font-medium">{item.label}</span><span className="mt-1 block text-xs text-muted-foreground">{item.description}</span></span></button>; })}</CardContent></Card>
-      <Card><CardHeader><CardTitle>System health</CardTitle></CardHeader><CardContent className="space-y-3">{[["Directory sync", "Connected"], ["Database migrations", "Managed on request"], ["Notification channels", "Email + bell"], ["Urgent requests", analytics.urgent]].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b border-border pb-3 last:border-0 last:pb-0"><span className="text-sm text-muted-foreground">{label}</span><span className="flex items-center gap-1.5 text-sm font-medium text-foreground"><span className="h-1.5 w-1.5 rounded-full bg-success" />{value}</span></div>)}</CardContent></Card>
-    </div>
-  </div>;
-}
-
-function ApprovalConfiguration({ data, onSaved }: { data: ConfigurationData | null; onSaved: () => void }) {
-  const [name, setName] = React.useState(""); const [requestType, setRequestType] = React.useState("*"); const [approverValue, setApproverValue] = React.useState(""); const [saving, setSaving] = React.useState(false); const [message, setMessage] = React.useState("");
-  const save = async () => { setSaving(true); setMessage(""); try { const response = await fetch("/api/admin/configuration", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "approval-policy", name, requestType, steps: [{ name: "Primary approval", approverType: "user", approverValue }] }) }); const body = await response.json(); if (!response.ok) throw new Error(body.error); setName(""); setApproverValue(""); setMessage("Approval policy saved and audited."); onSaved(); } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to save policy"); } finally { setSaving(false); } };
-  return <div className="space-y-6"><Card><CardHeader><CardTitle className="flex items-center justify-between">Create approval policy <Badge variant="neutral">Simulation-ready model</Badge></CardTitle></CardHeader><CardContent><div className="grid gap-4 md:grid-cols-3"><div><Label htmlFor="policy-name">Policy name</Label><Input id="policy-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. HR onboarding approvals" /></div><div><Label htmlFor="policy-type">Request type</Label><Select id="policy-type" value={requestType} onChange={(event) => setRequestType(event.target.value)}><option value="*">All request types</option><option value="general">General request</option><option value="hr-onboarding">HR onboarding</option><option value="hr-offboarding">HR offboarding</option><option value="infosec-exception">InfoSec exception</option></Select></div><div><Label htmlFor="policy-approver">Approver identifier</Label><Input id="policy-approver" value={approverValue} onChange={(event) => setApproverValue(event.target.value)} placeholder="User ID, manager or role" /></div></div><div className="mt-4 flex items-center justify-between gap-3"><p className="text-sm text-muted-foreground">Additional levels, delegates, backup and escalation rules can be added to this policy record.</p><Button onClick={save} disabled={saving || !name.trim() || !approverValue.trim()}><Plus className="h-4 w-4" />{saving ? "Saving…" : "Add policy"}</Button></div>{message && <p className="mt-3 text-sm text-muted-foreground">{message}</p>}</CardContent></Card><Card><CardHeader><CardTitle>Configured policies</CardTitle></CardHeader><CardContent>{!data?.policies.length ? <p className="text-sm text-muted-foreground">No approval policies configured yet.</p> : <div className="divide-y divide-border">{data.policies.map((policy) => <div key={policy.id} className="flex items-center justify-between gap-4 py-3"><div><p className="text-sm font-medium">{policy.name}</p><p className="text-xs text-muted-foreground">{policy.request_type} · {policy.steps.length} level{policy.steps.length === 1 ? "" : "s"}</p></div><Badge variant="success">Active</Badge></div>)}</div>}</CardContent></Card></div>;
-}
-
-function BusinessConfiguration({ data, onSaved }: { data: ConfigurationData | null; onSaved: () => void }) {
-  const [type, setType] = React.useState<"department" | "category">("department");
+export function MetadataManager({ resource }: { resource: Resource }) {
+  const copy = RESOURCE_COPY[resource];
+  const [items, setItems] = React.useState<Item[]>([]);
+  const [key, setKey] = React.useState("");
   const [name, setName] = React.useState("");
-  const [code, setCode] = React.useState("");
+  const [definition, setDefinition] = React.useState("{}");
   const [message, setMessage] = React.useState("");
+
+  const load = React.useCallback(() => {
+    fetch("/api/admin/metadata").then((response) => response.json()).then((body) => {
+      const map: Record<Resource, Item[] | undefined> = { form: body.forms, workflow: body.workflows, notification: body.notifications, report: body.reports, setting: body.settings, feature: body.flags };
+      setItems(map[resource] ?? []);
+    });
+  }, [resource]);
+
+  React.useEffect(() => { load(); }, [load]);
+
   const save = async () => {
     setMessage("");
-    const response = await fetch("/api/admin/configuration", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type, name, ...(type === "department" ? { code } : { slug: code }) }) });
-    const body = await response.json();
-    if (!response.ok) { setMessage(body.error ?? "Unable to save configuration"); return; }
-    setName(""); setCode(""); setMessage(`${type === "department" ? "Department" : "Category"} saved and audited.`); onSaved();
+    let parsed: unknown = {};
+    try { parsed = JSON.parse(definition || "{}"); } catch { setMessage("Definition must be valid JSON."); return; }
+    const body = resource === "setting" ? { resource, key, value: parsed } : resource === "feature" ? { resource, key, enabled: true, description: name } : { resource, key, name, definition: parsed, ...(resource === "notification" ? { channels: ["in-app", "email"], template: parsed } : {}) };
+    const response = await fetch("/api/admin/metadata", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const result = await response.json();
+    if (!response.ok) { setMessage(result.error ?? "Unable to save definition"); return; }
+    setKey(""); setName(""); setDefinition("{}"); setMessage("Definition saved and audited."); load();
   };
-  return <div className="space-y-6"><Card><CardHeader><CardTitle>Add business configuration</CardTitle></CardHeader><CardContent><div className="grid gap-4 md:grid-cols-3"><div><Label htmlFor="business-type">Type</Label><Select id="business-type" value={type} onChange={(event) => setType(event.target.value as "department" | "category")}><option value="department">Department</option><option value="category">Category</option></Select></div><div><Label htmlFor="business-name">Name</Label><Input id="business-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Finance" /></div><div><Label htmlFor="business-code">{type === "department" ? "Code" : "Slug"}</Label><Input id="business-code" value={code} onChange={(event) => setCode(event.target.value)} placeholder={type === "department" ? "FINANCE" : "finance"} /></div></div><div className="mt-4 flex items-center justify-between gap-3"><p className="text-sm text-muted-foreground">These values become managed references for forms, workflows and reports.</p><Button onClick={save} disabled={!name.trim() || !code.trim()}><Plus className="h-4 w-4" />Save {type}</Button></div>{message && <p className="mt-3 text-sm text-muted-foreground">{message}</p>}</CardContent></Card><div className="grid gap-6 md:grid-cols-2"><Card><CardHeader><CardTitle>Departments</CardTitle></CardHeader><CardContent>{!data?.departments.length ? <p className="text-sm text-muted-foreground">No departments configured.</p> : <div className="divide-y divide-border">{data.departments.map((item) => <div key={item.id} className="flex items-center justify-between py-3"><span className="text-sm font-medium">{item.name}</span><Badge variant={item.is_active ? "success" : "neutral"}>{item.code}</Badge></div>)}</div>}</CardContent></Card><Card><CardHeader><CardTitle>Categories</CardTitle></CardHeader><CardContent>{!data?.categories.length ? <p className="text-sm text-muted-foreground">No categories configured.</p> : <div className="divide-y divide-border">{data.categories.map((item) => <div key={item.id} className="flex items-center justify-between py-3"><span className="text-sm font-medium">{item.name}</span><Badge variant={item.is_active ? "success" : "neutral"}>{item.slug}</Badge></div>)}</div>}</CardContent></Card></div></div>;
+
+  return <div className="space-y-6"><Card><CardHeader><CardTitle className="flex items-center justify-between">{copy.title}<Button variant="ghost" size="icon" onClick={load} title="Refresh definitions" aria-label="Refresh definitions"><RefreshCw className="h-4 w-4" /></Button></CardTitle></CardHeader><CardContent><div className="grid gap-4 md:grid-cols-2"><div><Label htmlFor={`${resource}-key`}>{copy.key}</Label><Input id={`${resource}-key`} value={key} onChange={(event) => setKey(event.target.value)} placeholder="unique-key" /></div><div><Label htmlFor={`${resource}-name`}>{copy.name}</Label><Input id={`${resource}-name`} value={name} onChange={(event) => setName(event.target.value)} placeholder={resource === "feature" ? "What this flag controls" : "Display name"} /></div></div><div className="mt-4"><Label htmlFor={`${resource}-definition`}>{resource === "feature" ? "Configuration" : "Definition JSON"}</Label><Textarea id={`${resource}-definition`} value={definition} onChange={(event) => setDefinition(event.target.value)} rows={5} className="font-mono text-xs" placeholder='{"conditions": [], "actions": []}' /></div><div className="mt-4 flex items-center justify-between gap-3"><p className="text-sm text-muted-foreground">Changes are persisted independently from application code and recorded in the admin audit log.</p><Button onClick={save} disabled={!key.trim() || (resource !== "setting" && !name.trim())}><Plus className="h-4 w-4" />Save definition</Button></div>{message && <p className="mt-3 text-sm text-muted-foreground">{message}</p>}</CardContent></Card><Card><CardHeader><CardTitle>Configured definitions</CardTitle></CardHeader><CardContent>{!items.length ? <p className="text-sm text-muted-foreground">No definitions configured yet.</p> : <div className="divide-y divide-border">{items.map((item, index) => <div key={item.id ?? index} className="flex items-center justify-between gap-4 py-3"><div><p className="text-sm font-medium">{item.name ?? item.form_key ?? item.workflow_key ?? item.event_key ?? item.report_key ?? item.setting_key ?? item.flag_key}</p><p className="text-xs text-muted-foreground">{item.status ?? (item.enabled === false ? "Disabled" : "Active")}</p></div><Badge variant={item.enabled === false ? "neutral" : "success"}>{item.enabled === false ? "Disabled" : "Configured"}</Badge></div>)}</div>}</CardContent></Card></div>;
 }
-
-function AuditPanel({ refresh }: { refresh: number }) { const [items, setItems] = React.useState<Array<{ id: string; actor_email: string; action: string; resource_type: string; created_at: string }>>([]); React.useEffect(() => { fetch("/api/admin/audit?limit=50").then((response) => response.json()).then((body) => setItems(body.items ?? [])); }, [refresh]); return <Card><CardHeader><CardTitle>Recent administrative activity</CardTitle></CardHeader><CardContent>{!items.length ? <p className="text-sm text-muted-foreground">No administrative events recorded yet.</p> : <div className="divide-y divide-border">{items.map((item) => <div key={item.id} className="flex items-center gap-3 py-3"><Activity className="h-4 w-4 shrink-0 text-primary" /><div className="min-w-0 flex-1"><p className="text-sm"><span className="font-medium">{item.actor_email}</span> {item.action} {item.resource_type}</p><p className="text-xs text-muted-foreground">{new Date(item.created_at).toLocaleString()}</p></div></div>)}</div>}</CardContent></Card>; }
-
-function AccessPanel({ data }: { data: ConfigurationData | null }) { return <Card><CardHeader><CardTitle>Role and permission matrix</CardTitle></CardHeader><CardContent><div className="overflow-x-auto"><table className="w-full min-w-[560px] text-left text-sm"><thead className="border-b border-border text-xs uppercase text-muted-foreground"><tr><th className="px-3 py-2">Role</th><th className="px-3 py-2">Permission</th><th className="px-3 py-2">State</th></tr></thead><tbody className="divide-y divide-border">{(data?.permissions ?? []).map((permission) => <tr key={`${permission.role}-${permission.permission}`}><td className="px-3 py-3 font-medium">{permission.role}</td><td className="px-3 py-3 text-muted-foreground">{permission.permission}</td><td className="px-3 py-3"><Badge variant={permission.granted ? "success" : "neutral"}>{permission.granted ? "Granted" : "Denied"}</Badge></td></tr>)}</tbody></table></div></CardContent></Card>; }
-
-function ExtensionPanel({ icon: Icon, title, text }: { icon: typeof Workflow; title: string; text: string }) { return <Card><CardContent className="flex min-h-56 flex-col items-center justify-center px-6 py-10 text-center"><Icon className="h-10 w-10 text-primary" /><h3 className="mt-4 text-lg font-semibold">{title}</h3><p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">{text}</p><Badge variant="warning" className="mt-5">Configuration module</Badge></CardContent></Card>; }
