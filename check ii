@@ -1,8 +1,28 @@
-const {
-  control,
-  register,
-  formState: { errors },
-} = useFormContext<GeneralRequestFormValues>();
+"use client";
+
+import * as React from "react";
+import { Controller, useFormContext } from "react-hook-form";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { FieldError } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { DirectoryPicker } from "@/components/general-request/DirectoryPickers";
+import { UserAvatar } from "@/components/ui/user-avatar";
+import { useCurrentUser } from "@/components/hooks/useCurrentUser";
+import type { DirectoryUser } from "@/lib/user-types";
+import type { GeneralRequestFormValues } from "@/lib/schema";
+
+const LOCKED_INPUT_CLASS = "read-only:cursor-not-allowed read-only:bg-secondary";
+
+export function RequesterInformationCard() {
+  const {
+    control,
+    register,
+    watch,
+    setValue,
+    formState: { errors },
+  } = useFormContext<GeneralRequestFormValues>();
 
 const onBehalf = watch("onBehalf");
 const requestedFor = watch("requestedFor");
@@ -279,6 +299,7 @@ return (
     </CardContent>
   </Card>
 );
+}
 
 function BeneficiaryRow({
   label,
