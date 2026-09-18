@@ -1,7 +1,7 @@
 "use client";
 
+import * as React from "react";
 import { Controller, useFormContext } from "react-hook-form";
-import { ShieldCheck, X } from "lucide-react";
 
 import {
   Card,
@@ -12,227 +12,167 @@ import {
 
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import { UserAvatar } from "@/components/ui/user-avatar";
-
+import { TagInput } from "./TagInput";
 import {
+  DirectoryPicker,
   DirectoryMultiPicker,
-  userPhotoUrl,
 } from "./DirectoryPickers";
-
-import {
-  APPROVER_STATUSES,
-  type Approver,
-  type ApproverStatus,
-} from "@/lib/types";
-
+import { ApproverPanel } from "./ApproverPanel";
+import { TAG_SUGGESTIONS } from "@/lib/mock-data";
 import type { GeneralRequestFormValues } from "@/lib/schema";
-import { cn } from "@/lib/utils";
 
-const STATUS_DOT: Record<ApproverStatus, string> = {
-  Active: "bg-blue-500",
-  Approved: "bg-green-500",
-  "On Hold": "bg-orange-500",
-  Cancelled: "bg-slate-400",
-};
+/**
+ * Departments sourced from synced Entra ID users.
+ */
+function useDepartments() {
+  const [departments, setDepartments] = React.useState<string[]>([]);
 
-export function ApproverPanel() {
-  const { control } =
+  React.useEffect(() => {
+    let active = true;
+
+    fetch("/api/departments")
+      .then((res) =>
+        res.ok ? res.json() : { departments: [] }
+      )
+      .then((data: { departments: string[] }) => {
+        if (active) {
+          setDepartments(data.departments ?? []);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setDepartments([]);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return departments;
+}
+
+export function AssignmentTrackingCard() {
+  const { control, watch, setValue } =
     useFormContext<GeneralRequestFormValues>();
 
+  const departments = useDepartments();
+  const assignedDepartment = watch("assignedDepartment");
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <ShieldCheck className="h-4 w-4 text-primary" />
-          Approvers Panel
-        </CardTitle>
-      </CardHeader>
+    <>
+      <Card>
+        <CardHeader>
+          <CardTitle>Assignment and Tracking</CardTitle>
+        </CardHeader>
 
-      <CardContent className="space-y-4">
-        <Controller
-          control={control}
-          name="approvers"
-          render={({ field }) => {
-            const approvers =
-              (field.value ?? []) as Approver[];
+        <CardContent className="space-y-5">
+          {/* Assigned Department — sourced from Entra ID */}
+          <div>
+            <Label htmlFor="assignedDepartment">
+              Assigned Department
+            </Label>
 
-            const addPeople = (
-              people: {
-                id: string;
-                name: string;
-                email: string;
-                department: string;
-              }[]
-            ) => {
-              const existing = new Set(
-                approvers.map((a) => a.id)
-              );
+            <Controller
+              control={control}
+              name="assignedDepartment"
+              render={({ field }) => (
+                <Select
+                  id="assignedDepartment"
+                  value={field.value ?? ""}
+                  onChange={(e) => {
+                    field.onChange(e.target.value);
 
-              const additions: Approver[] = people
-                .filter((p) => !existing.has(p.id))
-                .map((p) => ({
-                  ...p,
-                  status: "Active" as ApproverStatus,
-                  comment: "",
-                }));
+                    // Reset assignee when the department changes.
+                    setValue("assignedTo", null, {
+                      shouldDirty: true,
+                    });
+                  }}
+                >
+                  <option value="">
+                    Select a department
+                  </option>
 
-              field.onChange([
-                ...approvers,
-                ...additions,
-              ]);
-            };
+                  {departments.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            />
+          </div>
 
-            const patch = (
-              id: string,
-              changes: Partial<Approver>
-            ) => {
-              field.onChange(
-                approvers.map((a) =>
-                  a.id === id
-                    ? { ...a, ...changes }
-                    : a
-                )
-              );
-            };
+          {/* Assigned To — restricted to the selected department */}
+          <div>
+            <Label htmlFor="assignedTo">
+              Assigned To
+            </Label>
 
-            const remove = (id: string) => {
-              field.onChange(
-                approvers.filter((a) => a.id !== id)
-              );
-            };
-
-            return (
-              <>
-                <DirectoryMultiPicker
-                  id="approvers"
-                  value={[]}
-                  onChange={addPeople}
-                  placeholder="Search approvers by email..."
+            <Controller
+              control={control}
+              name="assignedTo"
+              render={({ field }) => (
+                <DirectoryPicker
+                  id="assignedTo"
+                  value={field.value ?? null}
+                  onChange={field.onChange}
+                  department={
+                    assignedDepartment || undefined
+                  }
+                  disabled={!assignedDepartment}
+                  disabledHint="Select a department first"
+                  emptyLabel="Unassigned"
+                  placeholder="Search people in this department..."
                 />
+              )}
+            />
+          </div>
 
-                {approvers.length === 0 ? (
-                  <p className="rounded-md border border-dashed border-border px-3 py-4 text-center text-sm text-muted-foreground">
-                    No approvers added yet.
-                  </p>
-                ) : (
-                  <ul className="space-y-3">
-                    {approvers.map((approver) => (
-                      <li
-                        key={approver.id}
-                        className="rounded-lg border border-border p-3"
-                      >
-                        <div className="flex items-start gap-2.5">
-                          <UserAvatar
-                            name={approver.name}
-                            src={userPhotoUrl(
-                              approver.id
-                            )}
-                            size="md"
-                          />
+          {/* Followers — any organization user */}
+          <div>
+            <Label htmlFor="followers">
+              Followers
+            </Label>
 
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-sm font-medium text-foreground">
-                              {approver.name}
-                            </div>
+            <Controller
+              control={control}
+              name="followers"
+              render={({ field }) => (
+                <DirectoryMultiPicker
+                  id="followers"
+                  value={field.value ?? []}
+                  onChange={field.onChange}
+                  placeholder="Add followers..."
+                />
+              )}
+            />
+          </div>
 
-                            <div className="truncate text-xs text-muted-foreground">
-                              {approver.email}
-                            </div>
-                          </div>
+          {/* Tags */}
+          <div>
+            <Label htmlFor="tags">
+              Tags
+            </Label>
 
-                          <button
-                            type="button"
-                            aria-label={`Remove ${approver.name}`}
-                            onClick={() =>
-                              remove(approver.id)
-                            }
-                            className="rounded p-1 text-muted-foreground hover:bg-secondary hover:text-foreground"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
+            <Controller
+              control={control}
+              name="tags"
+              render={({ field }) => (
+                <TagInput
+                  id="tags"
+                  value={field.value ?? []}
+                  onChange={field.onChange}
+                  suggestions={TAG_SUGGESTIONS}
+                />
+              )}
+            />
+          </div>
+        </CardContent>
+      </Card>
 
-                        <div className="mt-3 grid gap-3">
-                          <div>
-                            <Label
-                              htmlFor={`approver-status-${approver.id}`}
-                              className="text-xs"
-                            >
-                              Status
-                            </Label>
-
-                            <div className="relative">
-                              <span
-                                className={cn(
-                                  "pointer-events-none absolute left-3 top-1/2 h-2 w-2 -translate-y-1/2 rounded-full",
-                                  STATUS_DOT[
-                                    approver.status
-                                  ]
-                                )}
-                              />
-
-                              <Select
-                                id={`approver-status-${approver.id}`}
-                                value={approver.status}
-                                onChange={(e) =>
-                                  patch(
-                                    approver.id,
-                                    {
-                                      status:
-                                        e.target
-                                          .value as ApproverStatus,
-                                    }
-                                  )
-                                }
-                                className="pl-7"
-                              >
-                                {APPROVER_STATUSES.map(
-                                  (status) => (
-                                    <option
-                                      key={status}
-                                      value={status}
-                                    >
-                                      {status}
-                                    </option>
-                                  )
-                                )}
-                              </Select>
-                            </div>
-                          </div>
-
-                          <div>
-                            <Label
-                              htmlFor={`approver-comment-${approver.id}`}
-                              className="text-xs"
-                            >
-                              Comment
-                            </Label>
-
-                            <Textarea
-                              id={`approver-comment-${approver.id}`}
-                              rows={2}
-                              maxLength={500}
-                              placeholder="Add a short review note..."
-                              value={approver.comment ?? ""}
-                              onChange={(e) =>
-                                patch(approver.id, {
-                                  comment:
-                                    e.target.value,
-                                })
-                              }
-                            />
-                          </div>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </>
-            );
-          }}
-        />
-      </CardContent>
-    </Card>
+      <ApproverPanel />
+    </>
   );
 }
