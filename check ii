@@ -1,116 +1,131 @@
 import { q, q1, withTransaction } from "@/lib/db/client";
+import { writeAdminAudit, type AdminActor } from "@/lib/services/administration";
+import { cloneDefaultRequestForms, type RequestFormDefinition, type RequestFormInput } from "@/lib/service-categories";
 
-export interface AdminActor { id: string; email: string; name: string; }
+export type MetadataResource = "form" | "workflow" | "notification" | "report" | "setting" | "feature";
 
-export interface AdminAuditInput {
-  actor: AdminActor;
-  action: string;
-  resourceType: string;
-  resourceId?: string | null;
-  oldValue?: unknown;
-  newValue?: unknown;
-  metadata?: Record<string, unknown>;
-}
-
-export async function writeAdminAudit(client: { query: (text: string, params?: unknown[]) => Promise<unknown> }, input: AdminAuditInput) {
-  await client.query(
-    `INSERT INTO admin_audit_logs (actor_id, actor_email, action, resource_type, resource_id, old_value, new_value, metadata)
-     VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb)`,
-    [input.actor.id, input.actor.email, input.action, input.resourceType, input.resourceId ?? null,
-      JSON.stringify(input.oldValue ?? null), JSON.stringify(input.newValue ?? null), JSON.stringify(input.metadata ?? {})]
-  );
-}
-
-export async function listAdminConfiguration() {
-  const [departments, categories, policies, permissions] = await Promise.all([
-    q(`SELECT * FROM admin_departments ORDER BY is_active DESC, name`),
-    q(`SELECT * FROM admin_categories ORDER BY is_active DESC, name`),
-    q(`SELECT p.*, COALESCE(json_agg(s ORDER BY s.step_order) FILTER (WHERE s.id IS NOT NULL), '[]') AS steps
-         FROM approval_policies p LEFT JOIN approval_policy_steps s ON s.policy_id = p.id
-        GROUP BY p.id ORDER BY p.is_active DESC, p.name`),
-    q(`SELECT * FROM admin_permissions ORDER BY role, permission`),
+export async function listPlatformMetadata() {
+  const [forms, workflows, notifications, reports, settings, flags] = await Promise.all([
+    q(`SELECT d.*, COALESCE(json_agg(v ORDER BY v.version DESC) FILTER (WHERE v.id IS NOT NULL), '[]') AS versions FROM request_form_definitions d LEFT JOIN request_form_versions v ON v.form_id = d.id GROUP BY d.id ORDER BY d.updated_at DESC`),
+    q(`SELECT d.*, COALESCE(json_agg(v ORDER BY v.version DESC) FILTER (WHERE v.id IS NOT NULL), '[]') AS versions FROM workflow_definitions d LEFT JOIN workflow_versions v ON v.workflow_id = d.id GROUP BY d.id ORDER BY d.updated_at DESC`),
+    q(`SELECT * FROM notification_definitions ORDER BY event_key`),
+    q(`SELECT * FROM report_definitions ORDER BY updated_at DESC`),
+    q(`SELECT * FROM portal_settings ORDER BY setting_key`),
+    q(`SELECT * FROM feature_flags ORDER BY flag_key`),
   ]);
-  return { departments, categories, policies, permissions };
+  return { forms, workflows, notifications, reports, settings, flags };
 }
 
-export async function createAdminDepartment(input: { name: string; code: string; description?: string }, actor: AdminActor) {
+export async function createPlatformMetadata(resource: MetadataResource, input: Record<string, unknown>, actor: AdminActor) {
   return withTransaction(async (client) => {
-    const row = await client.query<{ id: string }>(
-      `INSERT INTO admin_departments (name, code, description, created_by) VALUES ($1,$2,$3,$4) RETURNING id`,
-      [input.name.trim(), input.code.trim().toUpperCase(), input.description?.trim() ?? "", actor.id]
-    );
-    await writeAdminAudit(client, { actor, action: "created", resourceType: "department", resourceId: row.rows[0].id, newValue: input });
-    return row.rows[0].id;
-  });
-}
-
-export async function createAdminCategory(input: { name: string; slug: string; parentId?: string | null; description?: string }, actor: AdminActor) {
-  return withTransaction(async (client) => {
-    const row = await client.query<{ id: string }>(
-      `INSERT INTO admin_categories (name, slug, parent_id, description, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-      [input.name.trim(), input.slug.trim().toLowerCase(), input.parentId ?? null, input.description?.trim() ?? "", actor.id]
-    );
-    await writeAdminAudit(client, { actor, action: "created", resourceType: "category", resourceId: row.rows[0].id, newValue: input });
-    return row.rows[0].id;
-  });
-}
-
-export async function createApprovalPolicy(input: { name: string; requestType?: string; departmentCode?: string; priority?: string; steps: Array<{ name: string; approverType: string; approverValue: string; timeoutHours?: number; escalationValue?: string }> }, actor: AdminActor) {
-  return withTransaction(async (client) => {
-    const policy = await client.query<{ id: string }>(
-      `INSERT INTO approval_policies (name, request_type, department_code, priority, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-      [input.name.trim(), input.requestType ?? "*", input.departmentCode ?? null, input.priority ?? null, actor.id]
-    );
-    for (const [index, step] of input.steps.entries()) {
-      await client.query(
-        `INSERT INTO approval_policy_steps (policy_id, step_order, name, approver_type, approver_value, timeout_hours, escalation_value) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [policy.rows[0].id, index + 1, step.name, step.approverType, step.approverValue, step.timeoutHours ?? 48, step.escalationValue ?? null]
-      );
+    let id: string;
+    if (resource === "form") {
+      const row = await client.query<{ id: string }>(`INSERT INTO request_form_definitions (form_key, name, description, status, created_by) VALUES ($1,$2,$3,'draft',$4) RETURNING id`, [input.key, input.name, input.description ?? "", actor.id]);
+      id = row.rows[0].id;
+      await client.query(`INSERT INTO request_form_versions (form_id, version, definition, created_by) VALUES ($1,1,$2::jsonb,$3)`, [id, JSON.stringify(input.definition ?? {}), actor.id]);
+    } else if (resource === "workflow") {
+      const row = await client.query<{ id: string }>(`INSERT INTO workflow_definitions (workflow_key, name, request_type, created_by) VALUES ($1,$2,$3,$4) RETURNING id`, [input.key, input.name, input.requestType ?? "*", actor.id]);
+      id = row.rows[0].id;
+      await client.query(`INSERT INTO workflow_versions (workflow_id, version, definition, created_by) VALUES ($1,1,$2::jsonb,$3)`, [id, JSON.stringify(input.definition ?? {}), actor.id]);
+    } else if (resource === "notification") {
+      const row = await client.query<{ id: string }>(`INSERT INTO notification_definitions (event_key, name, channels, template, updated_by) VALUES ($1,$2,$3::jsonb,$4::jsonb,$5) RETURNING id`, [input.key, input.name, JSON.stringify(input.channels ?? ["in-app"]), JSON.stringify(input.template ?? {}), actor.id]);
+      id = row.rows[0].id;
+    } else if (resource === "report") {
+      const row = await client.query<{ id: string }>(`INSERT INTO report_definitions (name, report_key, definition, created_by) VALUES ($1,$2,$3::jsonb,$4) RETURNING id`, [input.name, input.key, JSON.stringify(input.definition ?? {}), actor.id]);
+      id = row.rows[0].id;
+    } else if (resource === "setting") {
+      id = String(input.key);
+      await client.query(`INSERT INTO portal_settings (setting_key, setting_value, updated_by) VALUES ($1,$2::jsonb,$3) ON CONFLICT (setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_by = excluded.updated_by, updated_at = now()`, [id, JSON.stringify(input.value ?? null), actor.id]);
+    } else {
+      id = String(input.key);
+      await client.query(`INSERT INTO feature_flags (flag_key, enabled, description, updated_by) VALUES ($1,$2,$3,$4) ON CONFLICT (flag_key) DO UPDATE SET enabled = excluded.enabled, description = excluded.description, updated_by = excluded.updated_by, updated_at = now()`, [id, Boolean(input.enabled), input.description ?? "", actor.id]);
     }
-    await writeAdminAudit(client, { actor, action: "created", resourceType: "approval_policy", resourceId: policy.rows[0].id, newValue: input });
-    return policy.rows[0].id;
+    await writeAdminAudit(client, { actor, action: resource === "setting" || resource === "feature" ? "updated" : "created", resourceType: resource, resourceId: id, newValue: input });
+    return id;
   });
 }
 
-export async function listAdminAudit(limit = 100, filters: { query?: string; resourceType?: string } = {}) {
-  const params: unknown[] = [];
-  const conditions: string[] = [];
-  if (filters.query?.trim()) { params.push(`%${filters.query.trim()}%`); conditions.push(`(actor_email ILIKE $${params.length} OR action ILIKE $${params.length} OR resource_type ILIKE $${params.length})`); }
-  if (filters.resourceType?.trim()) { params.push(filters.resourceType.trim()); conditions.push(`resource_type = $${params.length}`); }
-  params.push(Math.min(Math.max(limit, 1), 500));
-  return q(`SELECT id, actor_email, action, resource_type, resource_id, old_value, new_value, created_at FROM admin_audit_logs ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT $${params.length}`, params);
+export async function getPublishedForm(formKey: string) {
+  return q1(`SELECT d.*, v.definition AS version_definition FROM request_form_definitions d JOIN request_form_versions v ON v.form_id = d.id AND v.version = d.active_version WHERE d.form_key = $1 AND d.status = 'published' AND v.status = 'published'`, [formKey]);
 }
 
-export async function updateConfigurationState(resourceType: "department" | "category" | "approval_policy", id: string, active: boolean, actor: AdminActor) {
-  const table = resourceType === "department" ? "admin_departments" : resourceType === "category" ? "admin_categories" : "approval_policies";
+export async function listRequestFormCatalog(): Promise<RequestFormDefinition[]> {
+  const rows = await q<{ form_key: string; name: string; description: string; status: string; version_definition: RequestFormDefinition["questions"] | null }>(
+    `SELECT d.form_key, d.name, d.description, d.status, v.definition AS version_definition
+       FROM request_form_definitions d
+       LEFT JOIN request_form_versions v ON v.form_id = d.id AND v.version = d.active_version
+      WHERE d.status = 'published' ORDER BY d.name`
+  );
+  const defaults = cloneDefaultRequestForms();
+  const databaseForms = rows.map((row) => {
+    const definition = (row.version_definition ?? {}) as Partial<RequestFormDefinition>;
+    return {
+      id: row.form_key,
+      title: row.name,
+      description: row.description,
+      icon: definition.icon ?? "file-text",
+      accent: definition.accent ?? "blue",
+      status: "published" as const,
+      template: "general" as const,
+      questions: definition.questions ?? [],
+    };
+  });
+  const ids = new Set(databaseForms.map((form) => form.id));
+  return [...defaults.filter((form) => !ids.has(form.id)), ...databaseForms];
+}
+
+export async function saveRequestForm(form: RequestFormDefinition | (RequestFormInput & { id: string }), actor: AdminActor) {
   return withTransaction(async (client) => {
-    const previous = await client.query<Record<string, unknown>>(`SELECT * FROM ${table} WHERE id = $1 FOR UPDATE`, [id]);
-    if (!previous.rows[0]) throw new Error("Configuration not found");
-    await client.query(`UPDATE ${table} SET is_active = $2, updated_at = now() WHERE id = $1`, [id, active]);
-    await writeAdminAudit(client, { actor, action: active ? "activated" : "deactivated", resourceType, resourceId: id, oldValue: previous.rows[0], newValue: { is_active: active } });
+    const key = form.id;
+    const existing = await client.query<{ id: string; active_version: number }>(`SELECT id, active_version FROM request_form_definitions WHERE form_key = $1 FOR UPDATE`, [key]);
+    let formId = existing.rows[0]?.id;
+    let version = (existing.rows[0]?.active_version ?? 0) + 1;
+    if (!formId) {
+      const created = await client.query<{ id: string }>(`INSERT INTO request_form_definitions (form_key, name, description, status, active_version, created_by) VALUES ($1,$2,$3,$4,1,$5) RETURNING id`, [key, form.title, form.description, form.status, actor.id]);
+      formId = created.rows[0].id;
+      version = 1;
+    } else {
+      await client.query(`UPDATE request_form_definitions SET name = $2, description = $3, status = $4, active_version = $5, updated_at = now() WHERE id = $1`, [formId, form.title, form.description, form.status, version]);
+    }
+    await client.query(`INSERT INTO request_form_versions (form_id, version, definition, status, created_by) VALUES ($1,$2,$3::jsonb,$4,$5)`, [formId, version, JSON.stringify(form), form.status === "published" ? "published" : "draft", actor.id]);
+    await writeAdminAudit(client, { actor, action: existing.rows[0] ? "versioned" : "created", resourceType: "form", resourceId: formId, newValue: form });
+    return { id: formId, version };
   });
 }
 
-export async function simulateApprovalPolicy(input: { requestType: string; departmentCode?: string; priority?: string }) {
-  const policy = await q1<{ id: string; name: string; request_type: string; department_code: string | null }>(
-    `SELECT id, name, request_type, department_code FROM approval_policies
-      WHERE is_active AND (request_type = $1 OR request_type = '*')
-        AND (department_code IS NULL OR lower(department_code) = lower($2))
-        AND (priority IS NULL OR priority = $3)
-      ORDER BY (request_type = $1) DESC, (department_code IS NOT NULL) DESC LIMIT 1`,
-    [input.requestType, input.departmentCode ?? "", input.priority ?? ""]
-  );
-  if (!policy) return { policy: null, steps: [] };
-  const steps = await q(`SELECT step_order, name, approver_type, approver_value, timeout_hours, escalation_value FROM approval_policy_steps WHERE policy_id = $1 ORDER BY step_order`, [policy.id]);
-  return { policy, steps };
+export async function deactivateRequestForm(formKey: string, actor: AdminActor) {
+  await withTransaction(async (client) => {
+    const row = await client.query(`UPDATE request_form_definitions SET status = 'hidden', updated_at = now() WHERE form_key = $1 RETURNING id`, [formKey]);
+    if (!row.rows[0]) throw new Error("Form not found");
+    await writeAdminAudit(client, { actor, action: "deactivated", resourceType: "form", resourceId: formKey, newValue: { status: "hidden" } });
+  });
 }
 
-export async function getAdminCounts() {
-  const row = await q1<{ users: string; departments: string; policies: string; audits: string }>(
-    `SELECT (SELECT COUNT(*) FROM organization_users WHERE account_status = 'active')::int AS users,
-            (SELECT COUNT(*) FROM admin_departments WHERE is_active)::int AS departments,
-            (SELECT COUNT(*) FROM approval_policies WHERE is_active)::int AS policies,
-            (SELECT COUNT(*) FROM admin_audit_logs)::int AS audits`
+export async function getPublishedWorkflow(requestType: string, department?: string, priority?: string) {
+  return q1<{ definition: Record<string, unknown> }>(
+    `SELECT v.definition
+       FROM workflow_definitions d
+       JOIN workflow_versions v ON v.workflow_id = d.id AND v.version = d.active_version AND v.status = 'published'
+      WHERE d.status = 'published' AND (d.request_type = $1 OR d.request_type = '*')
+      ORDER BY (d.request_type = $1) DESC LIMIT 1`,
+    [requestType, department ?? "", priority ?? ""]
   );
-  return { users: Number(row?.users ?? 0), departments: Number(row?.departments ?? 0), policies: Number(row?.policies ?? 0), audits: Number(row?.audits ?? 0) };
+}
+
+export async function isNotificationEnabled(eventKey: string): Promise<boolean> {
+  const row = await q1<{ enabled: boolean }>(`SELECT enabled FROM notification_definitions WHERE event_key = $1`, [eventKey]);
+  return row?.enabled ?? true;
+}
+
+export async function validateWorkflowTransition(requestType: string, fromStatus: string, toStatus: string): Promise<void> {
+  if (fromStatus === toStatus) return;
+  const workflow = await getPublishedWorkflow(requestType);
+  const transitions = workflow?.definition?.transitions;
+  if (!Array.isArray(transitions) || transitions.length === 0) return;
+  const allowed = transitions.some((transition) => {
+    if (!transition || typeof transition !== "object") return false;
+    const candidate = transition as { from?: unknown; to?: unknown };
+    return candidate.from === fromStatus && candidate.to === toStatus;
+  });
+  if (!allowed) throw new Error(`Workflow does not allow transition from ${fromStatus} to ${toStatus}`);
 }
