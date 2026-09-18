@@ -1,88 +1,116 @@
-declare module "lucide-react" {
-  import * as React from "react";
+import { q, q1, withTransaction } from "@/lib/db/client";
 
-  export type LucideIcon = React.ComponentType<
-    React.SVGProps<SVGSVGElement>
-  >;
+export interface AdminActor { id: string; email: string; name: string; }
 
-  export const AlertTriangle: LucideIcon;
-  export const ArrowDown: LucideIcon;
-  export const ArrowLeft: LucideIcon;
-  export const ArrowRight: LucideIcon;
-  export const ArrowUp: LucideIcon;
-  export const Bold: LucideIcon;
-  export const Briefcase: LucideIcon;
-  export const Building2: LucideIcon;
-  export const Check: LucideIcon;
-  export const CheckCircle2: LucideIcon;
-  export const ChevronDown: LucideIcon;
-  export const ChevronRight: LucideIcon;
-  export const ChevronsUpDown: LucideIcon;
-  export const Clock: LucideIcon;
-  export const Columns3: LucideIcon;
-  export const ExternalLink: LucideIcon;
-  export const File: LucideIcon;
-  export const FileDown: LucideIcon;
-  export const FileImage: LucideIcon;
-  export const FilePlus2: LucideIcon;
-  export const FileSpreadsheet: LucideIcon;
-  export const FileText: LucideIcon;
-  export const FileWarning: LucideIcon;
-  export const FileX2: LucideIcon;
-  export const Filter: LucideIcon;
-  export const Heading2: LucideIcon;
-  export const Headset: LucideIcon;
-  export const HelpCircle: LucideIcon;
-  export const History: LucideIcon;
-  export const Home: LucideIcon;
-  export const Inbox: LucideIcon;
-  export const Info: LucideIcon;
-  export const Italic: LucideIcon;
-  export const KeyRound: LucideIcon;
-  export const Laptop: LucideIcon;
-  export const LayoutDashboard: LucideIcon;
-  export const LayoutGrid: LucideIcon;
-  export const LifeBuoy: LucideIcon;
-  export const Link2: LucideIcon;
-  export const List: LucideIcon;
-  export const ListChecks: LucideIcon;
-  export const ListOrdered: LucideIcon;
-  export const ListTodo: LucideIcon;
-  export const Loader2: LucideIcon;
-  export const LogIn: LucideIcon;
-  export const LogOut: LucideIcon;
-  export const Mail: LucideIcon;
-  export const MapPin: LucideIcon;
-  export const Menu: LucideIcon;
-  export const MessageSquare: LucideIcon;
-  export const Moon: LucideIcon;
-  export const Paperclip: LucideIcon;
-  export const Pencil: LucideIcon;
-  export const Phone: LucideIcon;
-  export const Plus: LucideIcon;
-  export const Quote: LucideIcon;
-  export const RefreshCw: LucideIcon;
-  export const RemoveFormatting: LucideIcon;
-  export const Rows3: LucideIcon;
-  export const Save: LucideIcon;
-  export const Search: LucideIcon;
-  export const Send: LucideIcon;
-  export const Settings: LucideIcon;
-  export const ShieldAlert: LucideIcon;
-  export const ShieldCheck: LucideIcon;
-  export const ShoppingCart: LucideIcon;
-  export const Sun: LucideIcon;
-  export const Table2: LucideIcon;
-  export const Trash2: LucideIcon;
-  export const Underline: LucideIcon;
-  export const UploadCloud: LucideIcon;
-  export const User: LucideIcon;
-  export const UserCheck: LucideIcon;
-  export const UserPlus: LucideIcon;
-  export const UserRound: LucideIcon;
-  export const UserRoundCheck: LucideIcon;
-  export const Users: LucideIcon;
-  export const Workflow: LucideIcon;
-  export const Wrench: LucideIcon;
-  export const X: LucideIcon;
+export interface AdminAuditInput {
+  actor: AdminActor;
+  action: string;
+  resourceType: string;
+  resourceId?: string | null;
+  oldValue?: unknown;
+  newValue?: unknown;
+  metadata?: Record<string, unknown>;
+}
+
+export async function writeAdminAudit(client: { query: (text: string, params?: unknown[]) => Promise<unknown> }, input: AdminAuditInput) {
+  await client.query(
+    `INSERT INTO admin_audit_logs (actor_id, actor_email, action, resource_type, resource_id, old_value, new_value, metadata)
+     VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb)`,
+    [input.actor.id, input.actor.email, input.action, input.resourceType, input.resourceId ?? null,
+      JSON.stringify(input.oldValue ?? null), JSON.stringify(input.newValue ?? null), JSON.stringify(input.metadata ?? {})]
+  );
+}
+
+export async function listAdminConfiguration() {
+  const [departments, categories, policies, permissions] = await Promise.all([
+    q(`SELECT * FROM admin_departments ORDER BY is_active DESC, name`),
+    q(`SELECT * FROM admin_categories ORDER BY is_active DESC, name`),
+    q(`SELECT p.*, COALESCE(json_agg(s ORDER BY s.step_order) FILTER (WHERE s.id IS NOT NULL), '[]') AS steps
+         FROM approval_policies p LEFT JOIN approval_policy_steps s ON s.policy_id = p.id
+        GROUP BY p.id ORDER BY p.is_active DESC, p.name`),
+    q(`SELECT * FROM admin_permissions ORDER BY role, permission`),
+  ]);
+  return { departments, categories, policies, permissions };
+}
+
+export async function createAdminDepartment(input: { name: string; code: string; description?: string }, actor: AdminActor) {
+  return withTransaction(async (client) => {
+    const row = await client.query<{ id: string }>(
+      `INSERT INTO admin_departments (name, code, description, created_by) VALUES ($1,$2,$3,$4) RETURNING id`,
+      [input.name.trim(), input.code.trim().toUpperCase(), input.description?.trim() ?? "", actor.id]
+    );
+    await writeAdminAudit(client, { actor, action: "created", resourceType: "department", resourceId: row.rows[0].id, newValue: input });
+    return row.rows[0].id;
+  });
+}
+
+export async function createAdminCategory(input: { name: string; slug: string; parentId?: string | null; description?: string }, actor: AdminActor) {
+  return withTransaction(async (client) => {
+    const row = await client.query<{ id: string }>(
+      `INSERT INTO admin_categories (name, slug, parent_id, description, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+      [input.name.trim(), input.slug.trim().toLowerCase(), input.parentId ?? null, input.description?.trim() ?? "", actor.id]
+    );
+    await writeAdminAudit(client, { actor, action: "created", resourceType: "category", resourceId: row.rows[0].id, newValue: input });
+    return row.rows[0].id;
+  });
+}
+
+export async function createApprovalPolicy(input: { name: string; requestType?: string; departmentCode?: string; priority?: string; steps: Array<{ name: string; approverType: string; approverValue: string; timeoutHours?: number; escalationValue?: string }> }, actor: AdminActor) {
+  return withTransaction(async (client) => {
+    const policy = await client.query<{ id: string }>(
+      `INSERT INTO approval_policies (name, request_type, department_code, priority, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+      [input.name.trim(), input.requestType ?? "*", input.departmentCode ?? null, input.priority ?? null, actor.id]
+    );
+    for (const [index, step] of input.steps.entries()) {
+      await client.query(
+        `INSERT INTO approval_policy_steps (policy_id, step_order, name, approver_type, approver_value, timeout_hours, escalation_value) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [policy.rows[0].id, index + 1, step.name, step.approverType, step.approverValue, step.timeoutHours ?? 48, step.escalationValue ?? null]
+      );
+    }
+    await writeAdminAudit(client, { actor, action: "created", resourceType: "approval_policy", resourceId: policy.rows[0].id, newValue: input });
+    return policy.rows[0].id;
+  });
+}
+
+export async function listAdminAudit(limit = 100, filters: { query?: string; resourceType?: string } = {}) {
+  const params: unknown[] = [];
+  const conditions: string[] = [];
+  if (filters.query?.trim()) { params.push(`%${filters.query.trim()}%`); conditions.push(`(actor_email ILIKE $${params.length} OR action ILIKE $${params.length} OR resource_type ILIKE $${params.length})`); }
+  if (filters.resourceType?.trim()) { params.push(filters.resourceType.trim()); conditions.push(`resource_type = $${params.length}`); }
+  params.push(Math.min(Math.max(limit, 1), 500));
+  return q(`SELECT id, actor_email, action, resource_type, resource_id, old_value, new_value, created_at FROM admin_audit_logs ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT $${params.length}`, params);
+}
+
+export async function updateConfigurationState(resourceType: "department" | "category" | "approval_policy", id: string, active: boolean, actor: AdminActor) {
+  const table = resourceType === "department" ? "admin_departments" : resourceType === "category" ? "admin_categories" : "approval_policies";
+  return withTransaction(async (client) => {
+    const previous = await client.query<Record<string, unknown>>(`SELECT * FROM ${table} WHERE id = $1 FOR UPDATE`, [id]);
+    if (!previous.rows[0]) throw new Error("Configuration not found");
+    await client.query(`UPDATE ${table} SET is_active = $2, updated_at = now() WHERE id = $1`, [id, active]);
+    await writeAdminAudit(client, { actor, action: active ? "activated" : "deactivated", resourceType, resourceId: id, oldValue: previous.rows[0], newValue: { is_active: active } });
+  });
+}
+
+export async function simulateApprovalPolicy(input: { requestType: string; departmentCode?: string; priority?: string }) {
+  const policy = await q1<{ id: string; name: string; request_type: string; department_code: string | null }>(
+    `SELECT id, name, request_type, department_code FROM approval_policies
+      WHERE is_active AND (request_type = $1 OR request_type = '*')
+        AND (department_code IS NULL OR lower(department_code) = lower($2))
+        AND (priority IS NULL OR priority = $3)
+      ORDER BY (request_type = $1) DESC, (department_code IS NOT NULL) DESC LIMIT 1`,
+    [input.requestType, input.departmentCode ?? "", input.priority ?? ""]
+  );
+  if (!policy) return { policy: null, steps: [] };
+  const steps = await q(`SELECT step_order, name, approver_type, approver_value, timeout_hours, escalation_value FROM approval_policy_steps WHERE policy_id = $1 ORDER BY step_order`, [policy.id]);
+  return { policy, steps };
+}
+
+export async function getAdminCounts() {
+  const row = await q1<{ users: string; departments: string; policies: string; audits: string }>(
+    `SELECT (SELECT COUNT(*) FROM organization_users WHERE account_status = 'active')::int AS users,
+            (SELECT COUNT(*) FROM admin_departments WHERE is_active)::int AS departments,
+            (SELECT COUNT(*) FROM approval_policies WHERE is_active)::int AS policies,
+            (SELECT COUNT(*) FROM admin_audit_logs)::int AS audits`
+  );
+  return { users: Number(row?.users ?? 0), departments: Number(row?.departments ?? 0), policies: Number(row?.policies ?? 0), audits: Number(row?.audits ?? 0) };
 }
