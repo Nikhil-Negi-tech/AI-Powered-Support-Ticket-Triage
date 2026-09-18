@@ -1,54 +1,13 @@
 import { NextResponse } from "next/server";
 import { getSessionUser, isAdminEmail } from "@/lib/session";
-import { createAdminCategory, createAdminDepartment, createApprovalPolicy, getAdminCounts, listAdminConfiguration, updateConfigurationState } from "@/lib/services/administration";
+import { listAdminAudit } from "@/lib/services/administration";
 
 export const dynamic = "force-dynamic";
 
-async function requireAdmin() {
+export async function GET(request: Request) {
   const user = await getSessionUser();
-  return user && (await isAdminEmail(user.email)) ? user : null;
-}
-
-export async function GET() {
-  if (!(await requireAdmin())) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  return NextResponse.json({ ...(await listAdminConfiguration()), counts: await getAdminCounts() });
-}
-
-export async function POST(request: Request) {
-  const user = await requireAdmin();
-  if (!user) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  let body: Record<string, unknown>;
-  try { body = await request.json(); } catch { return NextResponse.json({ error: "Invalid body" }, { status: 400 }); }
-  const actor = { id: user.id, email: user.email, name: user.displayName };
-  try {
-    if (body.type === "department") {
-      if (typeof body.name !== "string" || typeof body.code !== "string") throw new Error("Department name and code are required");
-      return NextResponse.json({ success: true, id: await createAdminDepartment({ name: body.name, code: body.code, description: typeof body.description === "string" ? body.description : "" }, actor) }, { status: 201 });
-    }
-    if (body.type === "category") {
-      if (typeof body.name !== "string" || typeof body.slug !== "string") throw new Error("Category name and slug are required");
-      return NextResponse.json({ success: true, id: await createAdminCategory({ name: body.name, slug: body.slug, parentId: typeof body.parentId === "string" ? body.parentId : null, description: typeof body.description === "string" ? body.description : "" }, actor) }, { status: 201 });
-    }
-    if (body.type === "approval-policy") {
-      if (typeof body.name !== "string" || !Array.isArray(body.steps) || body.steps.length === 0) throw new Error("Policy name and at least one step are required");
-      return NextResponse.json({ success: true, id: await createApprovalPolicy({ name: body.name, requestType: typeof body.requestType === "string" ? body.requestType : "*", departmentCode: typeof body.departmentCode === "string" ? body.departmentCode : undefined, priority: typeof body.priority === "string" ? body.priority : undefined, steps: body.steps as never }, actor) }, { status: 201 });
-    }
-    return NextResponse.json({ error: "Unknown configuration type" }, { status: 400 });
-  } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to save configuration" }, { status: 400 });
-  }
-}
-
-export async function PATCH(request: Request) {
-  const user = await requireAdmin();
-  if (!user) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  let body: Record<string, unknown>;
-  try { body = await request.json(); } catch { return NextResponse.json({ error: "Invalid body" }, { status: 400 }); }
-  if (!['department', 'category', 'approval_policy'].includes(String(body.resourceType)) || typeof body.id !== 'string' || typeof body.active !== 'boolean') return NextResponse.json({ error: "resourceType, id and active are required" }, { status: 400 });
-  try {
-    await updateConfigurationState(body.resourceType as "department" | "category" | "approval_policy", body.id, body.active, { id: user.id, email: user.email, name: user.displayName });
-    return NextResponse.json({ success: true });
-  } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to update configuration" }, { status: 400 });
-  }
+  if (!user || !(await isAdminEmail(user.email))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const params = new URL(request.url).searchParams;
+  const limit = Number(params.get("limit") ?? "100");
+  return NextResponse.json({ items: await listAdminAudit(limit, { query: params.get("q") ?? undefined, resourceType: params.get("resourceType") ?? undefined }) });
 }
