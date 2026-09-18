@@ -1,322 +1,206 @@
 "use client";
 
 import * as React from "react";
-import { Controller, useFormContext } from "react-hook-form";
+import {
+  Activity,
+  Bell,
+  BookOpen,
+  BriefcaseBusiness,
+  CheckCircle2,
+  ClipboardList,
+  FileBarChart,
+  GitBranch,
+  LayoutDashboard,
+  Plus,
+  Settings2,
+  ShieldCheck,
+  Users,
+  Workflow,
+} from "lucide-react";
+import { AdminManager } from "@/components/admin/AdminManager";
+import { UserManagementPanel } from "@/components/admin/UserManagementPanel";
+import { RequestFormManager } from "@/components/admin/RequestFormManager";
+import { MetadataManager } from "@/components/admin/MetadataManager";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
-import { FieldError } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { DirectoryPicker } from "@/components/general-request/DirectoryPickers";
-import { UserAvatar } from "@/components/ui/user-avatar";
-import { useCurrentUser } from "@/components/hooks/useCurrentUser";
-import type { DirectoryUser } from "@/lib/user-types";
-import type { GeneralRequestFormValues } from "@/lib/schema";
+import { Select } from "@/components/ui/select";
 
-const LOCKED_INPUT_CLASS = "read-only:cursor-not-allowed read-only:bg-secondary";
+type Section = "overview" | "directory" | "approvals" | "forms" | "business" | "workflows" | "notifications" | "reports" | "audit" | "settings" | "access";
 
-export function RequesterInformationCard() {
-  const {
-    control,
-    register,
-    watch,
-    setValue,
-    formState: { errors },
-  } = useFormContext<GeneralRequestFormValues>();
-
-const onBehalf = watch("onBehalf");
-const requestedFor = watch("requestedFor");
-
-// Directory-provided identity fields are shown but not editable.
-const { user } = useCurrentUser();
-const locked = !!user;
-
-// Full profile of the selected "Requested For" employee.
-const [beneficiary, setBeneficiary] =
-  React.useState<DirectoryUser | null>(null);
-
-React.useEffect(() => {
-  const id = requestedFor?.id;
-
-  if (!id) {
-    setBeneficiary(null);
-    return;
-  }
-
-  let active = true;
-
-  fetch(`/api/users/${id}`)
-    .then((res) => (res.ok ? res.json() : null))
-    .then((data: DirectoryUser | null) => {
-      if (active) setBeneficiary(data);
-    })
-    .catch(() => {
-      if (active) setBeneficiary(null);
-    });
-
-  return () => {
-    active = false;
-  };
-}, [requestedFor?.id]);
-
-return (
-  <Card>
-    <CardHeader>
-      <CardTitle>Requester Information</CardTitle>
-
-      {locked && (
-        <p className="text-xs text-muted-foreground">
-          Auto-filled from your directory profile and locked for accuracy.
-        </p>
-      )}
-    </CardHeader>
-
-    <CardContent className="space-y-5">
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-
-        <div>
-          <Label htmlFor="requesterName" required>
-            Requested By
-          </Label>
-
-          <Input
-            id="requesterName"
-            placeholder="Your full name"
-            readOnly={locked}
-            className={LOCKED_INPUT_CLASS}
-            invalid={!!errors.requesterName}
-            {...register("requesterName")}
-          />
-
-          <FieldError message={errors.requesterName?.message} />
-        </div>
-
-        <div>
-          <Label htmlFor="email" required>
-            Email
-          </Label>
-
-          <Input
-            id="email"
-            type="email"
-            inputMode="email"
-            placeholder="you@fareportal.com"
-            readOnly={locked}
-            className={LOCKED_INPUT_CLASS}
-            invalid={!!errors.email}
-            {...register("email")}
-          />
-
-          <FieldError message={errors.email?.message} />
-        </div>
-
-        <div>
-          <Label htmlFor="department" required>
-            Department
-          </Label>
-
-          <Input
-            id="department"
-            placeholder="e.g. IT Engineering"
-            readOnly={locked}
-            className={LOCKED_INPUT_CLASS}
-            invalid={!!errors.department}
-            {...register("department")}
-          />
-
-          <FieldError message={errors.department?.message} />
-        </div>
-
-        <div>
-          <Label htmlFor="manager">
-            Manager
-          </Label>
-
-          <Input
-            id="manager"
-            placeholder="Your reporting manager"
-            readOnly={locked}
-            className={LOCKED_INPUT_CLASS}
-            invalid={!!errors.manager}
-            {...register("manager")}
-          />
-
-          <FieldError message={errors.manager?.message} />
-        </div>
-
-        <div>
-          <Label htmlFor="officeLocation">
-            Office Location
-          </Label>
-
-          <Input
-            id="officeLocation"
-            placeholder="e.g. Gurugram"
-            readOnly={locked}
-            className={LOCKED_INPUT_CLASS}
-            invalid={!!errors.officeLocation}
-            {...register("officeLocation")}
-          />
-
-          <FieldError message={errors.officeLocation?.message} />
-        </div>
-
-        <div>
-          <Label htmlFor="contactNumber">
-            Contact Number{" "}
-            <span className="font-normal text-muted-foreground">
-              (Optional)
-            </span>
-          </Label>
-
-          <Input
-            id="contactNumber"
-            type="tel"
-            inputMode="tel"
-            placeholder="e.g. +91 9876 43210"
-            invalid={!!errors.contactNumber}
-            {...register("contactNumber")}
-          />
-
-          <FieldError message={errors.contactNumber?.message} />
-        </div>
-      </div>
-
-      <div className="border-t border-border pt-4">
-        <Controller
-          control={control}
-          name="onBehalf"
-          render={({ field }) => (
-            <div className="flex items-start gap-3">
-              <Checkbox
-                id="onBehalf"
-                checked={!!field.value}
-                onCheckedChange={(checked) => {
-                  field.onChange(checked);
-
-                  if (!checked) {
-                    setValue("requestedFor", null);
-                  }
-                }}
-              />
-
-              <Label
-                htmlFor="onBehalf"
-                className="cursor-pointer text-sm font-medium text-foreground"
-              >
-                Requesting on Someone Else's Behalf
-                <span className="block text-xs font-normal text-muted-foreground">
-                  Search the organization directory to raise this request for
-                  another employee.
-                </span>
-              </Label>
-            </div>
-          )}
-        />
-      </div>
-
-      {onBehalf && (
-        <div className="mt-4 space-y-3">
-          <Label htmlFor="requestedFor" required>
-            Requested For
-          </Label>
-
-          <Controller
-            control={control}
-            name="requestedFor"
-            render={({ field }) => (
-              <DirectoryPicker
-                id="requestedFor"
-                value={field.value}
-                onChange={field.onChange}
-                placeholder="Search for an employee"
-              />
-            )}
-          />
-
-          <FieldError message={errors.requestedFor?.message} />
-        </div>
-      )}
-
-      {beneficiary && (
-        <Card className="mt-4">
-          <CardHeader>
-            <CardTitle>Selected Employee</CardTitle>
-          </CardHeader>
-
-          <CardContent>
-            <div className="mb-3 flex items-center gap-3">
-              <UserAvatar
-                name={beneficiary.displayName}
-                size="md"
-              />
-
-              <div className="min-w-0">
-                <div className="truncate text-sm font-semibold text-foreground">
-                  {beneficiary.displayName}
-                </div>
-
-                <div className="truncate text-xs text-muted-foreground">
-                  {beneficiary.email}
-                </div>
-              </div>
-            </div>
-
-            <dl className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
-              <BeneficiaryRow
-                label="Department"
-                value={beneficiary.department}
-              />
-
-              <BeneficiaryRow
-                label="Job Title"
-                value={beneficiary.jobTitle}
-              />
-
-              <BeneficiaryRow
-                label="Office Location"
-                value={beneficiary.officeLocation}
-              />
-
-              <BeneficiaryRow
-                label="Contact Number"
-                value={beneficiary.contactNumber}
-              />
-
-              <BeneficiaryRow
-                label="Manager Name"
-                value={beneficiary.managerName}
-              />
-
-              <BeneficiaryRow
-                label="Manager Email"
-                value={beneficiary.managerEmail}
-              />
-            </dl>
-          </CardContent>
-        </Card>
-      )}
-    </CardContent>
-  </Card>
-);
+interface ConfigurationData {
+  departments: Array<{ id: string; name: string; code: string; is_active: boolean }>;
+  categories: Array<{ id: string; name: string; slug: string; is_active: boolean }>;
+  policies: Array<{ id: string; name: string; request_type: string; steps: Array<{ name: string; approver_type: string; approver_value: string }> }>;
+  permissions: Array<{ role: string; permission: string; granted: boolean }>;
+  counts: { users: number; departments: number; policies: number; audits: number };
 }
 
-function BeneficiaryRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="min-w-0">
-      <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
-      </dt>
+const NAV: Array<{ id: Section; label: string; description: string; icon: typeof Users }> = [
+  { id: "overview", label: "Overview", description: "System health and administration activity", icon: LayoutDashboard },
+  { id: "directory", label: "Users & Directory", description: "Entra users, roles and department ownership", icon: Users },
+  { id: "approvals", label: "Approvals", description: "Approval policies, delegates and simulation", icon: CheckCircle2 },
+  { id: "forms", label: "Request Forms", description: "Form catalog and versioned field definitions", icon: ClipboardList },
+  { id: "business", label: "Departments & Categories", description: "Business taxonomy used by request forms", icon: BookOpen },
+  { id: "workflows", label: "Workflows", description: "Status, assignment and escalation rules", icon: GitBranch },
+  { id: "notifications", label: "Notifications", description: "Events, channels and message templates", icon: Bell },
+  { id: "reports", label: "Reports & Export", description: "Saved reports, schedules and exports", icon: FileBarChart },
+  { id: "audit", label: "Audit Logs", description: "Administrative change history", icon: Activity },
+  { id: "settings", label: "Portal Settings", description: "Branding, defaults and feature flags", icon: Settings2 },
+  { id: "access", label: "Access Control", description: "Roles and configurable permissions", icon: ShieldCheck },
+];
 
-      <dd className="truncate text-sm font-medium text-foreground">
-        {value || "-"}
-      </dd>
-    </div>
+export function AdministrationCenter({ analytics }: { analytics: { total: number; open: number; urgent: number; byStatus: Record<string, number> } }) {
+  const [data, setData] = React.useState<ConfigurationData | null>(null);
+  const [error, setError] = React.useState("");
+  const [refresh, setRefresh] = React.useState(0);
+
+  React.useEffect(() => {
+    fetch("/api/admin/configuration")
+      .then(async (response) => {
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error ?? "Unable to load administration configuration");
+        setData(body);
+      })
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Unable to load administration configuration"));
+  }, [refresh]);
+
+  return (
+    <main className="min-h-screen bg-background">
+      <div className="mx-auto max-w-[1500px] px-4 py-6 sm:px-6 lg:px-8">
+        <header className="mb-6">
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">Administration</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Manage users, requests, approvals, workflows, and portal settings.</p>
+        </header>
+
+        {error && <p className="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</p>}
+
+        <div className="space-y-8">
+          <section aria-labelledby="quick-actions-heading">
+            <SectionHeading id="quick-actions-heading" title="Quick actions" />
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <QuickAction href="#users" icon={Users} label="Add or manage users" />
+              <QuickAction href="#forms" icon={ClipboardList} label="Create a request form" />
+              <QuickAction href="#workflows" icon={GitBranch} label="Create a workflow" />
+              <QuickAction href="#audit" icon={Activity} label="View audit logs" />
+            </div>
+          </section>
+
+          <section aria-labelledby="summary-heading">
+            <SectionHeading id="summary-heading" title="Administration at a glance" />
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+              <SummaryCard label="Active users" value={data?.counts.users ?? "—"} icon={Users} href="#users" />
+              <SummaryCard label="Open requests" value={analytics.open} icon={BriefcaseBusiness} href="#reports" />
+              <SummaryCard label="Approval policies" value={data?.counts.policies ?? "—"} icon={CheckCircle2} href="#approvals" />
+              <SummaryCard label="Urgent requests" value={analytics.urgent} icon={ShieldCheck} href="#reports" />
+              <SummaryCard label="Audit events" value={data?.counts.audits ?? "—"} icon={Activity} href="#audit" />
+            </div>
+          </section>
+
+          <section aria-labelledby="modules-heading">
+            <SectionHeading id="modules-heading" title="Administration modules" />
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <ModuleCard href="#users" icon={Users} title="Users & Directory" value={data?.counts.users ?? "—"} detail="Manage users, roles and departments" />
+              <ModuleCard href="#approvals" icon={CheckCircle2} title="Approvers" value={data?.counts.policies ?? "—"} detail="Manage policies and delegations" />
+              <ModuleCard href="#forms" icon={ClipboardList} title="Request Forms" value="Catalog" detail="Edit and publish intake forms" />
+              <ModuleCard href="#workflows" icon={GitBranch} title="Workflows" value="Metadata" detail="Manage routing and status rules" />
+              <ModuleCard href="#notifications" icon={Bell} title="Notifications" value="Events" detail="Manage channels and templates" />
+              <ModuleCard href="#reports" icon={FileBarChart} title="Reports & Export" value="CSV" detail="Review and export operations data" />
+              <ModuleCard href="#audit" icon={Activity} title="Audit Logs" value={data?.counts.audits ?? "—"} detail="Review administrative changes" />
+              <ModuleCard href="#settings" icon={Settings2} title="Settings" value="Portal" detail="Manage flags and configuration" />
+            </div>
+          </section>
+
+          <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+            <section aria-labelledby="health-heading">
+              <SectionHeading id="health-heading" title="System health" />
+              <Card><CardContent className="grid gap-3 p-4 sm:grid-cols-2">{[["Directory Sync", "Healthy"], ["Database", "Healthy"], ["Notifications", "Healthy"], ["Workflow Engine", "Healthy"], ["Audit Logging", "Healthy"]].map(([label, status]) => <div key={label} className="flex items-center justify-between rounded-md border border-border px-3 py-2.5"><span className="text-sm text-foreground">{label}</span><Badge variant="success"><span className="h-1.5 w-1.5 rounded-full bg-current" />{status}</Badge></div>)}</CardContent></Card>
+            </section>
+            <section aria-labelledby="actions-heading">
+              <SectionHeading id="actions-heading" title="Pending administrative actions" />
+              <Card><CardContent className="space-y-2 p-4"><ActionRow href="#users" label="Users requiring role assignment" value="Review directory" /><ActionRow href="#workflows" label="Unpublished workflows" value="Review workflows" /><ActionRow href="#approvals" label="Approval policies without approvers" value="Review approvals" /><ActionRow href="#forms" label="Draft forms awaiting publication" value="Review forms" /></CardContent></Card>
+            </section>
+          </div>
+
+          <section aria-labelledby="activity-heading"><div className="mb-3 flex items-center justify-between"><SectionHeading id="activity-heading" title="Recent administrative activity" /><a href="#audit" className="text-sm font-medium text-primary hover:underline">View all</a></div><AuditPanel refresh={refresh} /></section>
+
+          <section id="users" className="scroll-mt-6"><SectionHeading title="Users & Directory" /><UserManagementPanel /><AdminManager /></section>
+          <section id="approvals" className="scroll-mt-6"><SectionHeading title="Approvals" /><ApprovalConfiguration data={data} onSaved={() => setRefresh((value) => value + 1)} /></section>
+          <section id="forms" className="scroll-mt-6"><SectionHeading title="Request Forms" /><RequestFormManager /></section>
+          <section id="workflows" className="scroll-mt-6"><SectionHeading title="Workflows" /><MetadataManager resource="workflow" /></section>
+          <section id="notifications" className="scroll-mt-6"><SectionHeading title="Notifications" /><MetadataManager resource="notification" /></section>
+          <section id="reports" className="scroll-mt-6"><SectionHeading title="Reports & Export" /><div className="space-y-4"><div className="flex justify-end"><a href="/api/admin/reports/export" className="inline-flex h-10 items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-blue-700">Export requests CSV</a></div><MetadataManager resource="report" /></div></section>
+          <section id="audit" className="scroll-mt-6"><SectionHeading title="Audit Logs" /><AuditPanel refresh={refresh} /></section>
+          <section id="settings" className="scroll-mt-6"><SectionHeading title="Portal Settings" /><div className="space-y-6"><MetadataManager resource="setting" /><MetadataManager resource="feature" /></div></section>
+          <section id="access" className="scroll-mt-6"><SectionHeading title="Access Control" /><AccessPanel data={data} /></section>
+        </div>
+      </div>
+    </main>
   );
 }
+
+function SectionHeading({ id, title }: { id?: string; title: string }) {
+  return <h2 id={id} className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">{title}</h2>;
+}
+
+function QuickAction({ href, icon: Icon, label }: { href: string; icon: typeof Users; label: string }) {
+  return <a href={href} className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 text-sm font-medium text-foreground shadow-sm transition-colors hover:border-primary/40 hover:bg-accent"><span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/10 text-primary"><Icon className="h-4 w-4" /></span>{label}</a>;
+}
+
+function SummaryCard({ href, icon: Icon, label, value }: { href: string; icon: typeof Users; label: string; value: number | string }) {
+  return <a href={href} className="block"><Card className="card-hover p-4"><div className="flex items-start justify-between"><div><p className="text-sm font-medium text-muted-foreground">{label}</p><p className="mt-2 text-2xl font-semibold tracking-tight text-foreground">{value}</p></div><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-100 text-blue-700"><Icon className="h-4 w-4" /></span></div></Card></a>;
+}
+
+function ModuleCard({ href, icon: Icon, title, value, detail }: { href: string; icon: typeof Users; title: string; value: number | string; detail: string }) {
+  return <a href={href} className="block"><Card className="card-hover h-full p-4"><div className="flex items-start justify-between gap-3"><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary"><Icon className="h-4 w-4" /></span><Badge variant="neutral">{value}</Badge></div><h3 className="mt-4 text-sm font-semibold text-foreground">{title}</h3><p className="mt-1 text-xs text-muted-foreground">{detail}</p></Card></a>;
+}
+
+function ActionRow({ href, label, value }: { href: string; label: string; value: string }) {
+  return <a href={href} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2.5 text-sm transition-colors hover:bg-secondary"><span className="text-foreground">{label}</span><span className="shrink-0 text-xs font-medium text-primary">{value}</span></a>;
+}
+
+function Overview({ analytics, data, onNavigate }: { analytics: { total: number; open: number; urgent: number; byStatus: Record<string, number> }; data: ConfigurationData | null; onNavigate: (section: Section) => void }) {
+  const metrics = [
+    ["Active users", data?.counts.users ?? "—", Users, "directory" as Section],
+    ["Open requests", analytics.open, BriefcaseBusiness, "reports" as Section],
+    ["Pending approvals", analytics.byStatus["Approval Pending"] ?? 0, CheckCircle2, "approvals" as Section],
+    ["Approval policies", data?.counts.policies ?? "—", Workflow, "approvals" as Section],
+    ["Audit events", data?.counts.audits ?? "—", Activity, "audit" as Section],
+  ] as const;
+  return <div className="space-y-6">
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{metrics.map(([label, value, Icon, target]) => <button type="button" key={label} onClick={() => onNavigate(target)} className="rounded-lg border border-border bg-card p-4 text-left shadow-sm transition-colors hover:border-primary/40 hover:bg-accent"><Icon className="h-4 w-4 text-primary" /><p className="mt-4 text-2xl font-semibold text-foreground">{value}</p><p className="mt-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</p></button>)}</div>
+    <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+      <Card><CardHeader><CardTitle>Administration operating model</CardTitle></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2">{NAV.slice(1, 9).map((item) => { const Icon = item.icon; return <button type="button" key={item.id} onClick={() => onNavigate(item.id)} className="flex items-start gap-3 rounded-md border border-border p-3 text-left hover:bg-secondary"><Icon className="mt-0.5 h-4 w-4 text-primary" /><span><span className="block text-sm font-medium">{item.label}</span><span className="mt-1 block text-xs text-muted-foreground">{item.description}</span></span></button>; })}</CardContent></Card>
+      <Card><CardHeader><CardTitle>System health</CardTitle></CardHeader><CardContent className="space-y-3">{[["Directory sync", "Connected"], ["Database migrations", "Managed on request"], ["Notification channels", "Email + bell"], ["Urgent requests", analytics.urgent]].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b border-border pb-3 last:border-0 last:pb-0"><span className="text-sm text-muted-foreground">{label}</span><span className="flex items-center gap-1.5 text-sm font-medium text-foreground"><span className="h-1.5 w-1.5 rounded-full bg-success" />{value}</span></div>)}</CardContent></Card>
+    </div>
+  </div>;
+}
+
+function ApprovalConfiguration({ data, onSaved }: { data: ConfigurationData | null; onSaved: () => void }) {
+  const [name, setName] = React.useState(""); const [requestType, setRequestType] = React.useState("*"); const [approverValue, setApproverValue] = React.useState(""); const [saving, setSaving] = React.useState(false); const [message, setMessage] = React.useState("");
+  const save = async () => { setSaving(true); setMessage(""); try { const response = await fetch("/api/admin/configuration", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "approval-policy", name, requestType, steps: [{ name: "Primary approval", approverType: "user", approverValue }] }) }); const body = await response.json(); if (!response.ok) throw new Error(body.error); setName(""); setApproverValue(""); setMessage("Approval policy saved and audited."); onSaved(); } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to save policy"); } finally { setSaving(false); } };
+  return <div className="space-y-6"><Card><CardHeader><CardTitle className="flex items-center justify-between">Create approval policy <Badge variant="neutral">Simulation-ready model</Badge></CardTitle></CardHeader><CardContent><div className="grid gap-4 md:grid-cols-3"><div><Label htmlFor="policy-name">Policy name</Label><Input id="policy-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. HR onboarding approvals" /></div><div><Label htmlFor="policy-type">Request type</Label><Select id="policy-type" value={requestType} onChange={(event) => setRequestType(event.target.value)}><option value="*">All request types</option><option value="general">General request</option><option value="hr-onboarding">HR onboarding</option><option value="hr-offboarding">HR offboarding</option><option value="infosec-exception">InfoSec exception</option></Select></div><div><Label htmlFor="policy-approver">Approver identifier</Label><Input id="policy-approver" value={approverValue} onChange={(event) => setApproverValue(event.target.value)} placeholder="User ID, manager or role" /></div></div><div className="mt-4 flex items-center justify-between gap-3"><p className="text-sm text-muted-foreground">Additional levels, delegates, backup and escalation rules can be added to this policy record.</p><Button onClick={save} disabled={saving || !name.trim() || !approverValue.trim()}><Plus className="h-4 w-4" />{saving ? "Saving…" : "Add policy"}</Button></div>{message && <p className="mt-3 text-sm text-muted-foreground">{message}</p>}</CardContent></Card><Card><CardHeader><CardTitle>Configured policies</CardTitle></CardHeader><CardContent>{!data?.policies.length ? <p className="text-sm text-muted-foreground">No approval policies configured yet.</p> : <div className="divide-y divide-border">{data.policies.map((policy) => <div key={policy.id} className="flex items-center justify-between gap-4 py-3"><div><p className="text-sm font-medium">{policy.name}</p><p className="text-xs text-muted-foreground">{policy.request_type} · {policy.steps.length} level{policy.steps.length === 1 ? "" : "s"}</p></div><Badge variant="success">Active</Badge></div>)}</div>}</CardContent></Card></div>;
+}
+
+function BusinessConfiguration({ data, onSaved }: { data: ConfigurationData | null; onSaved: () => void }) {
+  const [type, setType] = React.useState<"department" | "category">("department");
+  const [name, setName] = React.useState("");
+  const [code, setCode] = React.useState("");
+  const [message, setMessage] = React.useState("");
+  const save = async () => {
+    setMessage("");
+    const response = await fetch("/api/admin/configuration", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type, name, ...(type === "department" ? { code } : { slug: code }) }) });
+    const body = await response.json();
+    if (!response.ok) { setMessage(body.error ?? "Unable to save configuration"); return; }
+    setName(""); setCode(""); setMessage(`${type === "department" ? "Department" : "Category"} saved and audited.`); onSaved();
+  };
+  return <div className="space-y-6"><Card><CardHeader><CardTitle>Add business configuration</CardTitle></CardHeader><CardContent><div className="grid gap-4 md:grid-cols-3"><div><Label htmlFor="business-type">Type</Label><Select id="business-type" value={type} onChange={(event) => setType(event.target.value as "department" | "category")}><option value="department">Department</option><option value="category">Category</option></Select></div><div><Label htmlFor="business-name">Name</Label><Input id="business-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Finance" /></div><div><Label htmlFor="business-code">{type === "department" ? "Code" : "Slug"}</Label><Input id="business-code" value={code} onChange={(event) => setCode(event.target.value)} placeholder={type === "department" ? "FINANCE" : "finance"} /></div></div><div className="mt-4 flex items-center justify-between gap-3"><p className="text-sm text-muted-foreground">These values become managed references for forms, workflows and reports.</p><Button onClick={save} disabled={!name.trim() || !code.trim()}><Plus className="h-4 w-4" />Save {type}</Button></div>{message && <p className="mt-3 text-sm text-muted-foreground">{message}</p>}</CardContent></Card><div className="grid gap-6 md:grid-cols-2"><Card><CardHeader><CardTitle>Departments</CardTitle></CardHeader><CardContent>{!data?.departments.length ? <p className="text-sm text-muted-foreground">No departments configured.</p> : <div className="divide-y divide-border">{data.departments.map((item) => <div key={item.id} className="flex items-center justify-between py-3"><span className="text-sm font-medium">{item.name}</span><Badge variant={item.is_active ? "success" : "neutral"}>{item.code}</Badge></div>)}</div>}</CardContent></Card><Card><CardHeader><CardTitle>Categories</CardTitle></CardHeader><CardContent>{!data?.categories.length ? <p className="text-sm text-muted-foreground">No categories configured.</p> : <div className="divide-y divide-border">{data.categories.map((item) => <div key={item.id} className="flex items-center justify-between py-3"><span className="text-sm font-medium">{item.name}</span><Badge variant={item.is_active ? "success" : "neutral"}>{item.slug}</Badge></div>)}</div>}</CardContent></Card></div></div>;
+}
+
+function AuditPanel({ refresh }: { refresh: number }) { const [items, setItems] = React.useState<Array<{ id: string; actor_email: string; action: string; resource_type: string; created_at: string }>>([]); React.useEffect(() => { fetch("/api/admin/audit?limit=50").then((response) => response.json()).then((body) => setItems(body.items ?? [])); }, [refresh]); return <Card><CardHeader><CardTitle>Recent administrative activity</CardTitle></CardHeader><CardContent>{!items.length ? <p className="text-sm text-muted-foreground">No administrative events recorded yet.</p> : <div className="divide-y divide-border">{items.map((item) => <div key={item.id} className="flex items-center gap-3 py-3"><Activity className="h-4 w-4 shrink-0 text-primary" /><div className="min-w-0 flex-1"><p className="text-sm"><span className="font-medium">{item.actor_email}</span> {item.action} {item.resource_type}</p><p className="text-xs text-muted-foreground">{new Date(item.created_at).toLocaleString()}</p></div></div>)}</div>}</CardContent></Card>; }
+
+function AccessPanel({ data }: { data: ConfigurationData | null }) { return <Card><CardHeader><CardTitle>Role and permission matrix</CardTitle></CardHeader><CardContent><div className="overflow-x-auto"><table className="w-full min-w-[560px] text-left text-sm"><thead className="border-b border-border text-xs uppercase text-muted-foreground"><tr><th className="px-3 py-2">Role</th><th className="px-3 py-2">Permission</th><th className="px-3 py-2">State</th></tr></thead><tbody className="divide-y divide-border">{(data?.permissions ?? []).map((permission) => <tr key={`${permission.role}-${permission.permission}`}><td className="px-3 py-3 font-medium">{permission.role}</td><td className="px-3 py-3 text-muted-foreground">{permission.permission}</td><td className="px-3 py-3"><Badge variant={permission.granted ? "success" : "neutral"}>{permission.granted ? "Granted" : "Denied"}</Badge></td></tr>)}</tbody></table></div></CardContent></Card>; }
+
+function ExtensionPanel({ icon: Icon, title, text }: { icon: typeof Workflow; title: string; text: string }) { return <Card><CardContent className="flex min-h-56 flex-col items-center justify-center px-6 py-10 text-center"><Icon className="h-10 w-10 text-primary" /><h3 className="mt-4 text-lg font-semibold">{title}</h3><p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">{text}</p><Badge variant="warning" className="mt-5">Configuration module</Badge></CardContent></Card>; }
