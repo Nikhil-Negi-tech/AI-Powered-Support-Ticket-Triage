@@ -1,7 +1,7 @@
 "use client";
 
-import * as React from "react";
-import { Controller, useFormContext } from "react-hook-form";
+import { useFormContext } from "react-hook-form";
+import { AlertTriangle } from "lucide-react";
 
 import {
   Card,
@@ -10,169 +10,183 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { TagInput } from "./TagInput";
+import { Textarea } from "@/components/ui/textarea";
+import { FieldError } from "@/components/ui/field";
 import {
-  DirectoryPicker,
-  DirectoryMultiPicker,
-} from "./DirectoryPickers";
-import { ApproverPanel } from "./ApproverPanel";
-import { TAG_SUGGESTIONS } from "@/lib/mock-data";
+  StatusBadge,
+  PriorityBadge,
+} from "@/components/ui/status-badges";
+
+import { PRIORITY_OPTIONS } from "@/lib/mock-data";
+import { formatDateTime } from "@/lib/utils";
+
 import type { GeneralRequestFormValues } from "@/lib/schema";
+import type { Priority } from "@/lib/types";
 
-/**
- * Departments sourced from synced Entra ID users.
- */
-function useDepartments() {
-  const [departments, setDepartments] = React.useState<string[]>([]);
-
-  React.useEffect(() => {
-    let active = true;
-
-    fetch("/api/departments")
-      .then((res) =>
-        res.ok ? res.json() : { departments: [] }
-      )
-      .then((data: { departments: string[] }) => {
-        if (active) {
-          setDepartments(data.departments ?? []);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setDepartments([]);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  return departments;
+interface RequestInformationCardProps {
+  createdAt: Date;
+  requestId: string | null;
 }
 
-export function AssignmentTrackingCard() {
-  const { control, watch, setValue } =
-    useFormContext<GeneralRequestFormValues>();
+function ReadOnlyRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-1">
+      <span className="text-sm text-muted-foreground">
+        {label}
+      </span>
 
-  const departments = useDepartments();
-  const assignedDepartment = watch("assignedDepartment");
+      <span className="text-right text-sm font-medium text-foreground">
+        {children}
+      </span>
+    </div>
+  );
+}
+
+export function RequestInformationCard({
+  createdAt,
+  requestId,
+}: RequestInformationCardProps) {
+  const {
+    register,
+    watch,
+    formState: { errors },
+  } = useFormContext<GeneralRequestFormValues>();
+
+  const priority = watch("priority") as Priority;
+  const isUrgent = priority === "Urgent";
 
   return (
-    <>
-      <Card>
-        <CardHeader>
-          <CardTitle>Assignment and Tracking</CardTitle>
-        </CardHeader>
+    <Card>
+      <CardHeader>
+        <CardTitle>Request Information</CardTitle>
+      </CardHeader>
 
-        <CardContent className="space-y-5">
-          {/* Assigned Department — sourced from Entra ID */}
-          <div>
-            <Label htmlFor="assignedDepartment">
-              Assigned Department
+      <CardContent className="space-y-4">
+        <ReadOnlyRow label="Status">
+          <StatusBadge status="Draft" />
+        </ReadOnlyRow>
+
+        <div className="border-t border-border pt-4">
+          <div className="mb-1.5 flex items-center justify-between">
+            <Label
+              htmlFor="priority"
+              required
+              className="mb-0"
+            >
+              Priority
             </Label>
 
-            <Controller
-              control={control}
-              name="assignedDepartment"
-              render={({ field }) => (
-                <Select
-                  id="assignedDepartment"
-                  value={field.value ?? ""}
-                  onChange={(e) => {
-                    field.onChange(e.target.value);
-
-                    // Reset assignee when the department changes.
-                    setValue("assignedTo", null, {
-                      shouldDirty: true,
-                    });
-                  }}
-                >
-                  <option value="">
-                    Select a department
-                  </option>
-
-                  {departments.map((d) => (
-                    <option key={d} value={d}>
-                      {d}
-                    </option>
-                  ))}
-                </Select>
-              )}
-            />
+            <PriorityBadge priority={priority} />
           </div>
 
-          {/* Assigned To — restricted to the selected department */}
-          <div>
-            <Label htmlFor="assignedTo">
-              Assigned To
-            </Label>
+          <Select
+            id="priority"
+            invalid={!!errors.priority}
+            {...register("priority")}
+          >
+            {PRIORITY_OPTIONS.map((opt) => (
+              <option
+                key={opt.value}
+                value={opt.value}
+              >
+                {opt.label} - {opt.hint}
+              </option>
+            ))}
+          </Select>
 
-            <Controller
-              control={control}
-              name="assignedTo"
-              render={({ field }) => (
-                <DirectoryPicker
-                  id="assignedTo"
-                  value={field.value ?? null}
-                  onChange={field.onChange}
-                  department={
-                    assignedDepartment || undefined
-                  }
-                  disabled={!assignedDepartment}
-                  disabledHint="Select a department first"
-                  emptyLabel="Unassigned"
-                  placeholder="Search people in this department..."
-                />
-              )}
-            />
+          <FieldError
+            message={errors.priority?.message as string}
+          />
+        </div>
+
+        {isUrgent && (
+          <div className="space-y-4 rounded-md border border-red-200 bg-red-50 p-3 dark:border-red-900/50 dark:bg-red-950/30">
+            <p className="flex items-center gap-1.5 text-xs font-semibold text-destructive">
+              <AlertTriangle className="h-4 w-4" />
+              Urgent priority requires additional details
+            </p>
+
+            <div>
+              <Label
+                htmlFor="urgentReason"
+                required
+              >
+                Reason for Urgent Priority
+              </Label>
+
+              <Textarea
+                id="urgentReason"
+                rows={3}
+                placeholder="Explain why this request is critical and time-sensitive."
+                invalid={!!errors.urgentReason}
+                {...register("urgentReason")}
+              />
+
+              <FieldError
+                message={errors.urgentReason?.message}
+              />
+            </div>
+
+            <div>
+              <Label
+                htmlFor="usersAffected"
+                required
+              >
+                Number of Users Affected
+              </Label>
+
+              <Input
+                id="usersAffected"
+                type="number"
+                min={1}
+                step={1}
+                placeholder="e.g. 25"
+                invalid={!!errors.usersAffected}
+                {...register("usersAffected", {
+                  valueAsNumber: true,
+                })}
+              />
+
+              <FieldError
+                message={
+                  errors.usersAffected?.message as string
+                }
+              />
+            </div>
           </div>
+        )}
 
-          {/* Followers — any organization user */}
-          <div>
-            <Label htmlFor="followers">
-              Followers
-            </Label>
+        <div className="space-y-1 border-t border-border pt-4">
+          <ReadOnlyRow label="Request Type">
+            General Request
+          </ReadOnlyRow>
 
-            <Controller
-              control={control}
-              name="followers"
-              render={({ field }) => (
-                <DirectoryMultiPicker
-                  id="followers"
-                  value={field.value ?? []}
-                  onChange={field.onChange}
-                  placeholder="Add followers..."
-                />
-              )}
-            />
-          </div>
+          <ReadOnlyRow label="Created Date">
+            {formatDateTime(createdAt)}
+          </ReadOnlyRow>
 
-          {/* Tags */}
-          <div>
-            <Label htmlFor="tags">
-              Tags
-            </Label>
-
-            <Controller
-              control={control}
-              name="tags"
-              render={({ field }) => (
-                <TagInput
-                  id="tags"
-                  value={field.value ?? []}
-                  onChange={field.onChange}
-                  suggestions={TAG_SUGGESTIONS}
-                />
-              )}
-            />
-          </div>
-        </CardContent>
-      </Card>
-
-      <ApproverPanel />
-    </>
+          <ReadOnlyRow label="Request ID">
+            {requestId ? (
+              <span className="font-mono text-primary">
+                {requestId}
+              </span>
+            ) : (
+              <span className="italic text-muted-foreground">
+                Generated after submission
+              </span>
+            )}
+          </ReadOnlyRow>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
