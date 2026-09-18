@@ -1,134 +1,96 @@
-import { NextResponse } from "next/server";
-import { getSessionUser } from "@/lib/session";
-import {
-  createRequest,
-  listRequests,
-  type ApproverInput,
-  type ActorRef,
-  type RequestType,
-} from "@/lib/services/requests";
-import { attachFilesToRequest } from "@/lib/services/attachments";
+import type { Metadata } from "next";
+import Link from "next/link";
+import { ArrowRight, BookOpen, HelpCircle, LifeBuoy, Search } from "lucide-react";
+import { Card } from "@/components/ui/card";
+import { FaqAccordion, type FaqItem } from "@/components/faq/FaqAccordion";
 
-export const dynamic = "force-dynamic";
+export const metadata: Metadata = {
+  title: "FAQ | ITSM Service Portal",
+  description: "Frequently asked questions about the service portal.",
+};
 
-interface IncomingPerson {
-  id?: string;
-  name?: string;
-  email?: string;
+const FAQS: FaqItem[] = [
+  {
+    id: "submit-request",
+    category: "Requests",
+    question: "How do I submit a new request?",
+    answer:
+      "Go to the Home page, choose a service category, and complete the request form. For anything that does not fit a specific category, use the General Request form.",
+  },
+  {
+    id: "priorities",
+    category: "Requests",
+    question: "What is the difference between the request priorities?",
+    answer:
+      "Low means no immediate impact, Medium means normal assistance is required, High means your work is significantly affected, and Urgent means a critical business activity is blocked. Urgent and High requests require a business justification.",
+  },
+  {
+    id: "request-on-behalf",
+    category: "Requests",
+    question: "Can I submit a request on behalf of a colleague?",
+    answer:
+      "Yes. On the request form, tick 'Requesting on behalf of someone else' and select the person from the people picker.",
+  },
+  {
+    id: "track-requests",
+    category: "Requests",
+    question: "How can I track the status of my requests?",
+    answer:
+      "Open the Requests page to see all recent requests. You can filter by department, category, priority, status, and date range to quickly find what you need.",
+  },
+  {
+    id: "attachments",
+    category: "Requests",
+    question: "What file types can I attach?",
+    answer:
+      "You can attach PNG, JPG, JPEG, PDF, DOC, DOCX, XLS, XLSX, and TXT files. Each file can be up to 10 MB, with a maximum of 5 files per request.",
+  },
+  {
+    id: "admin-access",
+    category: "Access & roles",
+    question: "Who can access the Admin and Dashboard areas?",
+    answer:
+      "The Dashboard provides analytics available to all users, while the Admin area is intended for service portal administrators to manage users, categories, and workflows.",
+  },
+  {
+    id: "drafts",
+    category: "Forms",
+    question: "Is my draft saved if I leave the form?",
+    answer:
+      "You can use 'Save as Draft' on request forms to store your progress locally in your browser and continue later. Drafts are scoped to your signed-in account on that device and are not submitted until you choose to submit the request.",
+  },
+];
+
+export default function FaqPage() {
+  return (
+    <main className="min-h-screen bg-background">
+      <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:py-10">
+        <div className="mb-8 overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+          <div className="relative bg-gradient-to-br from-slate-900 via-blue-950 to-primary px-6 py-9 text-white sm:px-10">
+            <div className="absolute right-8 top-8 hidden h-28 w-28 rounded-full border border-white/10 sm:block" />
+            <div className="relative max-w-2xl">
+              <div className="mb-4 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-blue-100">
+                <HelpCircle className="h-4 w-4" /> Help Centre
+              </div>
+              <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">How can we help?</h1>
+              <p className="mt-3 max-w-xl text-sm leading-6 text-blue-100">Find practical answers for submitting, tracking, and managing service requests across the portal.</p>
+            </div>
+          </div>
+          <div className="grid gap-3 border-t border-border bg-card p-4 sm:grid-cols-3 sm:p-5">
+            <SupportLink icon={BookOpen} title="Browse articles" text="Search by topic below" />
+            <SupportLink icon={Search} title="Track a request" text="Open your request history" href="/requests" />
+            <SupportLink icon={LifeBuoy} title="Need assistance?" text="Start a new request" href="/requests/general/new" />
+          </div>
+        </div>
+
+        <FaqAccordion items={FAQS} />
+
+      </div>
+    </main>
+  );
 }
 
-function toActor(p: IncomingPerson | null | undefined): ActorRef | null {
-  if (!p || !p.id) return null;
-  return { id: p.id, name: p.name ?? "", email: p.email ?? "" };
-}
-
-/** List requests (filterable, paginated). */
-export async function GET(request: Request) {
-  const user = await getSessionUser();
-  if (!user) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
-  }
-
-  const { searchParams } = new URL(request.url);
-  const mine = searchParams.get("mine") === "1";
-  const result = await listRequests({
-    status: searchParams.get("status") ?? undefined,
-    department: searchParams.get("department") ?? undefined,
-    requestType: searchParams.get("type") ?? undefined,
-    priority: searchParams.get("priority") ?? undefined,
-    requestedBy: mine ? user.id : undefined,
-    search: searchParams.get("q") ?? undefined,
-    limit: Number(searchParams.get("limit") ?? 50),
-    offset: Number(searchParams.get("offset") ?? 0),
-  });
-
-  return NextResponse.json(result);
-}
-
-/** Create (submit) a new request for the signed-in user. */
-export async function POST(request: Request) {
-  const user = await getSessionUser();
-  if (!user) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
-  }
-
-  let body: Record<string, unknown>;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid body" }, { status: 400 });
-  }
-
-  const requestType = String(body.requestType);
-  const title = typeof body.title === "string" ? body.title.trim() : "";
-  if (!title) {
-    return NextResponse.json({ error: "Title is required" }, { status: 400 });
-  }
-
-  const approvers: ApproverInput[] = Array.isArray(body.approvers)
-    ? (body.approvers as IncomingPerson[])
-        .filter((a) => a?.id)
-        .map((a) => ({
-          id: a.id as string,
-          name: a.name ?? "",
-          email: a.email ?? "",
-          status: (a as { status?: string }).status,
-          comment: (a as { comment?: string }).comment,
-        }))
-    : [];
-
-  const followers: ActorRef[] = Array.isArray(body.followers)
-    ? (body.followers as IncomingPerson[])
-        .filter((f) => f?.id)
-        .map((f) => ({
-          id: f.id as string,
-          name: f.name ?? "",
-          email: f.email ?? "",
-        }))
-    : [];
-
-  const attachmentIds: string[] = Array.isArray(body.attachmentIds)
-    ? body.attachmentIds.filter(
-        (id): id is string => typeof id === "string"
-      )
-    : [];
-
-  const created = await createRequest({
-    requestType: requestType as RequestType,
-    title,
-    description:
-      typeof body.description === "string" ? body.description : "",
-    status: "New",
-    priority:
-      typeof body.priority === "string" ? body.priority : "Medium",
-    requestedBy: {
-      id: user.id,
-      name: user.displayName,
-      email: user.email,
-    },
-    requestedFor: toActor(body.requestedFor as IncomingPerson | null),
-    requesterDepartment: user.department,
-    requestedForDepartment:
-      typeof body.requestedForDepartment === "string"
-        ? body.requestedForDepartment
-        : "",
-    department:
-      typeof body.department === "string" && body.department
-        ? body.department
-        : user.department,
-    assignedTo: toActor(body.assignedTo as IncomingPerson | null),
-    assignedDepartment:
-      typeof body.assignedDepartment === "string"
-        ? body.assignedDepartment
-        : "",
-    approvers,
-    followers,
-    payload: (body.payload as Record<string, unknown>) ?? {},
-  });
-
-  if (attachmentIds.length > 0) {
-    await attachFilesToRequest(created.id, attachmentIds);
-  }
-
-  return NextResponse.json({ success: true, ...created });
+function SupportLink({ icon: Icon, title, text, href }: { icon: typeof BookOpen; title: string; text: string; href?: string }) {
+  const content = <><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Icon className="h-4 w-4" /></span><span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-foreground">{title}</span><span className="mt-0.5 block text-xs text-muted-foreground">{text}</span></span>{href && <ArrowRight className="h-4 w-4 text-muted-foreground" />}</>;
+  return href ? <Link href={href} className="flex items-center gap-3 rounded-lg border border-transparent p-2.5 transition-colors hover:border-border hover:bg-secondary">{content}</Link> : <div className="flex items-center gap-3 rounded-lg p-2.5">{content}</div>;
 }
