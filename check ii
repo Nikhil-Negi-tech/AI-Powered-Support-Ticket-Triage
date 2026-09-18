@@ -1,22 +1,134 @@
-import type { Metadata } from "next";
-import { redirect } from "next/navigation";
+import { NextResponse } from "next/server";
+import { getSessionUser } from "@/lib/session";
+import {
+  createRequest,
+  listRequests,
+  type ApproverInput,
+  type ActorRef,
+  type RequestType,
+} from "@/lib/services/requests";
+import { attachFilesToRequest } from "@/lib/services/attachments";
 
-import { AdministrationCenter } from "@/components/admin/AdministrationCenter";
+export const dynamic = "force-dynamic";
 
-import { getRequestAnalytics } from "@/lib/services/requests";
-import { getSessionUser, isAdminEmail } from "@/lib/session";
+interface IncomingPerson {
+  id?: string;
+  name?: string;
+  email?: string;
+}
 
-export const metadata: Metadata = {
-  title: "Admin | ITSM Service Portal",
-  description: "Administration area for managing the service portal.",
-};
+function toActor(p: IncomingPerson | null | undefined): ActorRef | null {
+  if (!p || !p.id) return null;
+  return { id: p.id, name: p.name ?? "", email: p.email ?? "" };
+}
 
-export default async function AdminPage() {
+/** List requests (filterable, paginated). */
+export async function GET(request: Request) {
   const user = await getSessionUser();
-  if (!user) redirect("/login");
-  if (!(await isAdminEmail(user.email))) redirect("/");
+  if (!user) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
 
-  const a = await getRequestAnalytics();
+  const { searchParams } = new URL(request.url);
+  const mine = searchParams.get("mine") === "1";
+  const result = await listRequests({
+    status: searchParams.get("status") ?? undefined,
+    department: searchParams.get("department") ?? undefined,
+    requestType: searchParams.get("type") ?? undefined,
+    priority: searchParams.get("priority") ?? undefined,
+    requestedBy: mine ? user.id : undefined,
+    search: searchParams.get("q") ?? undefined,
+    limit: Number(searchParams.get("limit") ?? 50),
+    offset: Number(searchParams.get("offset") ?? 0),
+  });
 
-  return <AdministrationCenter analytics={a} />;
+  return NextResponse.json(result);
+}
+
+/** Create (submit) a new request for the signed-in user. */
+export async function POST(request: Request) {
+  const user = await getSessionUser();
+  if (!user) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid body" }, { status: 400 });
+  }
+
+  const requestType = String(body.requestType);
+  const title = typeof body.title === "string" ? body.title.trim() : "";
+  if (!title) {
+    return NextResponse.json({ error: "Title is required" }, { status: 400 });
+  }
+
+  const approvers: ApproverInput[] = Array.isArray(body.approvers)
+    ? (body.approvers as IncomingPerson[])
+        .filter((a) => a?.id)
+        .map((a) => ({
+          id: a.id as string,
+          name: a.name ?? "",
+          email: a.email ?? "",
+          status: (a as { status?: string }).status,
+          comment: (a as { comment?: string }).comment,
+        }))
+    : [];
+
+  const followers: ActorRef[] = Array.isArray(body.followers)
+    ? (body.followers as IncomingPerson[])
+        .filter((f) => f?.id)
+        .map((f) => ({
+          id: f.id as string,
+          name: f.name ?? "",
+          email: f.email ?? "",
+        }))
+    : [];
+
+  const attachmentIds: string[] = Array.isArray(body.attachmentIds)
+    ? body.attachmentIds.filter(
+        (id): id is string => typeof id === "string"
+      )
+    : [];
+
+  const created = await createRequest({
+    requestType: requestType as RequestType,
+    title,
+    description:
+      typeof body.description === "string" ? body.description : "",
+    status: "New",
+    priority:
+      typeof body.priority === "string" ? body.priority : "Medium",
+    requestedBy: {
+      id: user.id,
+      name: user.displayName,
+      email: user.email,
+    },
+    requestedFor: toActor(body.requestedFor as IncomingPerson | null),
+    requesterDepartment: user.department,
+    requestedForDepartment:
+      typeof body.requestedForDepartment === "string"
+        ? body.requestedForDepartment
+        : "",
+    department:
+      typeof body.department === "string" && body.department
+        ? body.department
+        : user.department,
+    assignedTo: toActor(body.assignedTo as IncomingPerson | null),
+    assignedDepartment:
+      typeof body.assignedDepartment === "string"
+        ? body.assignedDepartment
+        : "",
+    approvers,
+    followers,
+    payload: (body.payload as Record<string, unknown>) ?? {},
+  });
+
+  if (attachmentIds.length > 0) {
+    await attachFilesToRequest(created.id, attachmentIds);
+  }
+
+  return NextResponse.json({ success: true, ...created });
 }
