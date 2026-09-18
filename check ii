@@ -1,192 +1,301 @@
-"use client";
+const {
+  control,
+  register,
+  formState: { errors },
+} = useFormContext<GeneralRequestFormValues>();
 
-import { useFormContext } from "react-hook-form";
-import { AlertTriangle } from "lucide-react";
+const onBehalf = watch("onBehalf");
+const requestedFor = watch("requestedFor");
 
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+// Directory-provided identity fields are shown but not editable.
+const { user } = useCurrentUser();
+const locked = !!user;
 
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import { FieldError } from "@/components/ui/field";
-import {
-  StatusBadge,
-  PriorityBadge,
-} from "@/components/ui/status-badges";
+// Full profile of the selected "Requested For" employee.
+const [beneficiary, setBeneficiary] =
+  React.useState<DirectoryUser | null>(null);
 
-import { PRIORITY_OPTIONS } from "@/lib/mock-data";
-import { formatDateTime } from "@/lib/utils";
+React.useEffect(() => {
+  const id = requestedFor?.id;
 
-import type { GeneralRequestFormValues } from "@/lib/schema";
-import type { Priority } from "@/lib/types";
+  if (!id) {
+    setBeneficiary(null);
+    return;
+  }
 
-interface RequestInformationCardProps {
-  createdAt: Date;
-  requestId: string | null;
-}
+  let active = true;
 
-function ReadOnlyRow({
+  fetch(`/api/users/${id}`)
+    .then((res) => (res.ok ? res.json() : null))
+    .then((data: DirectoryUser | null) => {
+      if (active) setBeneficiary(data);
+    })
+    .catch(() => {
+      if (active) setBeneficiary(null);
+    });
+
+  return () => {
+    active = false;
+  };
+}, [requestedFor?.id]);
+
+return (
+  <Card>
+    <CardHeader>
+      <CardTitle>Requester Information</CardTitle>
+
+      {locked && (
+        <p className="text-xs text-muted-foreground">
+          Auto-filled from your directory profile and locked for accuracy.
+        </p>
+      )}
+    </CardHeader>
+
+    <CardContent className="space-y-5">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+
+        <div>
+          <Label htmlFor="requesterName" required>
+            Requested By
+          </Label>
+
+          <Input
+            id="requesterName"
+            placeholder="Your full name"
+            readOnly={locked}
+            className={LOCKED_INPUT_CLASS}
+            invalid={!!errors.requesterName}
+            {...register("requesterName")}
+          />
+
+          <FieldError message={errors.requesterName?.message} />
+        </div>
+
+        <div>
+          <Label htmlFor="email" required>
+            Email
+          </Label>
+
+          <Input
+            id="email"
+            type="email"
+            inputMode="email"
+            placeholder="you@fareportal.com"
+            readOnly={locked}
+            className={LOCKED_INPUT_CLASS}
+            invalid={!!errors.email}
+            {...register("email")}
+          />
+
+          <FieldError message={errors.email?.message} />
+        </div>
+
+        <div>
+          <Label htmlFor="department" required>
+            Department
+          </Label>
+
+          <Input
+            id="department"
+            placeholder="e.g. IT Engineering"
+            readOnly={locked}
+            className={LOCKED_INPUT_CLASS}
+            invalid={!!errors.department}
+            {...register("department")}
+          />
+
+          <FieldError message={errors.department?.message} />
+        </div>
+
+        <div>
+          <Label htmlFor="manager">
+            Manager
+          </Label>
+
+          <Input
+            id="manager"
+            placeholder="Your reporting manager"
+            readOnly={locked}
+            className={LOCKED_INPUT_CLASS}
+            invalid={!!errors.manager}
+            {...register("manager")}
+          />
+
+          <FieldError message={errors.manager?.message} />
+        </div>
+
+        <div>
+          <Label htmlFor="officeLocation">
+            Office Location
+          </Label>
+
+          <Input
+            id="officeLocation"
+            placeholder="e.g. Gurugram"
+            readOnly={locked}
+            className={LOCKED_INPUT_CLASS}
+            invalid={!!errors.officeLocation}
+            {...register("officeLocation")}
+          />
+
+          <FieldError message={errors.officeLocation?.message} />
+        </div>
+
+        <div>
+          <Label htmlFor="contactNumber">
+            Contact Number{" "}
+            <span className="font-normal text-muted-foreground">
+              (Optional)
+            </span>
+          </Label>
+
+          <Input
+            id="contactNumber"
+            type="tel"
+            inputMode="tel"
+            placeholder="e.g. +91 9876 43210"
+            invalid={!!errors.contactNumber}
+            {...register("contactNumber")}
+          />
+
+          <FieldError message={errors.contactNumber?.message} />
+        </div>
+      </div>
+
+      <div className="border-t border-border pt-4">
+        <Controller
+          control={control}
+          name="onBehalf"
+          render={({ field }) => (
+            <div className="flex items-start gap-3">
+              <Checkbox
+                id="onBehalf"
+                checked={!!field.value}
+                onCheckedChange={(checked) => {
+                  field.onChange(checked);
+
+                  if (!checked) {
+                    setValue("requestedFor", null);
+                  }
+                }}
+              />
+
+              <Label
+                htmlFor="onBehalf"
+                className="cursor-pointer text-sm font-medium text-foreground"
+              >
+                Requesting on Someone Else's Behalf
+                <span className="block text-xs font-normal text-muted-foreground">
+                  Search the organization directory to raise this request for
+                  another employee.
+                </span>
+              </Label>
+            </div>
+          )}
+        />
+      </div>
+
+      {onBehalf && (
+        <div className="mt-4 space-y-3">
+          <Label htmlFor="requestedFor" required>
+            Requested For
+          </Label>
+
+          <Controller
+            control={control}
+            name="requestedFor"
+            render={({ field }) => (
+              <DirectoryPicker
+                id="requestedFor"
+                value={field.value}
+                onChange={field.onChange}
+                placeholder="Search for an employee"
+              />
+            )}
+          />
+
+          <FieldError message={errors.requestedFor?.message} />
+        </div>
+      )}
+
+      {beneficiary && (
+        <Card className="mt-4">
+          <CardHeader>
+            <CardTitle>Selected Employee</CardTitle>
+          </CardHeader>
+
+          <CardContent>
+            <div className="mb-3 flex items-center gap-3">
+              <UserAvatar
+                name={beneficiary.displayName}
+                size="md"
+              />
+
+              <div className="min-w-0">
+                <div className="truncate text-sm font-semibold text-foreground">
+                  {beneficiary.displayName}
+                </div>
+
+                <div className="truncate text-xs text-muted-foreground">
+                  {beneficiary.email}
+                </div>
+              </div>
+            </div>
+
+            <dl className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
+              <BeneficiaryRow
+                label="Department"
+                value={beneficiary.department}
+              />
+
+              <BeneficiaryRow
+                label="Job Title"
+                value={beneficiary.jobTitle}
+              />
+
+              <BeneficiaryRow
+                label="Office Location"
+                value={beneficiary.officeLocation}
+              />
+
+              <BeneficiaryRow
+                label="Contact Number"
+                value={beneficiary.contactNumber}
+              />
+
+              <BeneficiaryRow
+                label="Manager Name"
+                value={beneficiary.managerName}
+              />
+
+              <BeneficiaryRow
+                label="Manager Email"
+                value={beneficiary.managerEmail}
+              />
+            </dl>
+          </CardContent>
+        </Card>
+      )}
+    </CardContent>
+  </Card>
+);
+
+function BeneficiaryRow({
   label,
-  children,
+  value,
 }: {
   label: string;
-  children: React.ReactNode;
+  value: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 py-1">
-      <span className="text-sm text-muted-foreground">
+    <div className="min-w-0">
+      <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
         {label}
-      </span>
+      </dt>
 
-      <span className="text-right text-sm font-medium text-foreground">
-        {children}
-      </span>
+      <dd className="truncate text-sm font-medium text-foreground">
+        {value || "-"}
+      </dd>
     </div>
-  );
-}
-
-export function RequestInformationCard({
-  createdAt,
-  requestId,
-}: RequestInformationCardProps) {
-  const {
-    register,
-    watch,
-    formState: { errors },
-  } = useFormContext<GeneralRequestFormValues>();
-
-  const priority = watch("priority") as Priority;
-  const isUrgent = priority === "Urgent";
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Request Information</CardTitle>
-      </CardHeader>
-
-      <CardContent className="space-y-4">
-        <ReadOnlyRow label="Status">
-          <StatusBadge status="Draft" />
-        </ReadOnlyRow>
-
-        <div className="border-t border-border pt-4">
-          <div className="mb-1.5 flex items-center justify-between">
-            <Label
-              htmlFor="priority"
-              required
-              className="mb-0"
-            >
-              Priority
-            </Label>
-
-            <PriorityBadge priority={priority} />
-          </div>
-
-          <Select
-            id="priority"
-            invalid={!!errors.priority}
-            {...register("priority")}
-          >
-            {PRIORITY_OPTIONS.map((opt) => (
-              <option
-                key={opt.value}
-                value={opt.value}
-              >
-                {opt.label} - {opt.hint}
-              </option>
-            ))}
-          </Select>
-
-          <FieldError
-            message={errors.priority?.message as string}
-          />
-        </div>
-
-        {isUrgent && (
-          <div className="space-y-4 rounded-md border border-red-200 bg-red-50 p-3 dark:border-red-900/50 dark:bg-red-950/30">
-            <p className="flex items-center gap-1.5 text-xs font-semibold text-destructive">
-              <AlertTriangle className="h-4 w-4" />
-              Urgent priority requires additional details
-            </p>
-
-            <div>
-              <Label
-                htmlFor="urgentReason"
-                required
-              >
-                Reason for Urgent Priority
-              </Label>
-
-              <Textarea
-                id="urgentReason"
-                rows={3}
-                placeholder="Explain why this request is critical and time-sensitive."
-                invalid={!!errors.urgentReason}
-                {...register("urgentReason")}
-              />
-
-              <FieldError
-                message={errors.urgentReason?.message}
-              />
-            </div>
-
-            <div>
-              <Label
-                htmlFor="usersAffected"
-                required
-              >
-                Number of Users Affected
-              </Label>
-
-              <Input
-                id="usersAffected"
-                type="number"
-                min={1}
-                step={1}
-                placeholder="e.g. 25"
-                invalid={!!errors.usersAffected}
-                {...register("usersAffected", {
-                  valueAsNumber: true,
-                })}
-              />
-
-              <FieldError
-                message={
-                  errors.usersAffected?.message as string
-                }
-              />
-            </div>
-          </div>
-        )}
-
-        <div className="space-y-1 border-t border-border pt-4">
-          <ReadOnlyRow label="Request Type">
-            General Request
-          </ReadOnlyRow>
-
-          <ReadOnlyRow label="Created Date">
-            {formatDateTime(createdAt)}
-          </ReadOnlyRow>
-
-          <ReadOnlyRow label="Request ID">
-            {requestId ? (
-              <span className="font-mono text-primary">
-                {requestId}
-              </span>
-            ) : (
-              <span className="italic text-muted-foreground">
-                Generated after submission
-              </span>
-            )}
-          </ReadOnlyRow>
-        </div>
-      </CardContent>
-    </Card>
   );
 }
