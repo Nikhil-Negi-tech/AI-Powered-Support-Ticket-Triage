@@ -1,194 +1,28 @@
 "use client";
 
 import * as React from "react";
-import {
-  cloneDefaultRequestForms,
-  parseRequestForms,
-  type RequestFormDefinition,
-  type RequestFormInput,
-} from "@/lib/service-categories";
+import { Check, Loader2, Search, UserRoundCheck } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+    const load = React.useCallback(() => {
+      fetch(`/api/admin/users?q=${encodeURIComponent(query)}`)
+        .then((response) => response.json())
+        .then((body) => setUsers(body.users ?? []));
+    }, [query]);
+import { Select } from "@/components/ui/select";
 
-const REQUEST_FORMS_STORAGE_KEY = "itsm.request-forms.v2";
-const REQUEST_FORMS_UPDATED_EVENT = "itsm:request-forms-updated";
+interface ManagedUser { id: string; display_name: string; email: string; department: string; job_title: string; account_status: string; roles: Array<{ role: string }>; }
 
-function loadRequestForms(): RequestFormDefinition[] {
-  try {
-    const raw = window.localStorage.getItem(REQUEST_FORMS_STORAGE_KEY);
-
-    if (!raw) return cloneDefaultRequestForms();
-
-    return (
-      parseRequestForms(JSON.parse(raw)) ??
-      cloneDefaultRequestForms()
-    );
-  } catch {
-    return cloneDefaultRequestForms();
-  }
-}
-
-function persistRequestForms(forms: RequestFormDefinition[]) {
-  try {
-    window.localStorage.setItem(
-      REQUEST_FORMS_STORAGE_KEY,
-      JSON.stringify(forms)
-    );
-
-    window.dispatchEvent(new Event(REQUEST_FORMS_UPDATED_EVENT));
-  } catch {
-    // Keep in-memory changes available when browser storage is blocked.
-  }
-}
-
-function createUniqueFormId(
-  title: string,
-  forms: RequestFormDefinition[]
-): string {
-  const base =
-    title
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "request";
-
-  const existingIds = new Set(forms.map((form) => form.id));
-
-  if (!existingIds.has(base)) return base;
-
-  let suffix = 2;
-
-  while (existingIds.has(`${base}-${suffix}`)) {
-    suffix += 1;
-  }
-
-  return `${base}-${suffix}`;
-}
-
-export function useRequestFormCatalog() {
-  const [forms, setForms] = React.useState<RequestFormDefinition[]>([]);
-  const [isLoaded, setIsLoaded] = React.useState(false);
-  const formsRef = React.useRef(forms);
-
-  const syncFromStorage = React.useCallback(() => {
-    const nextForms = loadRequestForms();
-
-    formsRef.current = nextForms;
-    setForms(nextForms);
-    setIsLoaded(true);
-  }, []);
-
-  React.useEffect(() => {
-    syncFromStorage();
-
-    fetch("/api/request-forms")
-      .then(async (response) => {
-        if (!response.ok) return null;
-        const body = await response.json();
-        return parseRequestForms(body.forms);
-      })
-      .then((remoteForms) => {
-        if (!remoteForms) return;
-        const localForms = loadRequestForms();
-        const localById = new Map(localForms.map((form) => [form.id, form]));
-        const mergedForms = remoteForms.map((form) => {
-          const local = localById.get(form.id);
-          return local && form.questions.length === 0 && local.questions.length > 0
-            ? { ...form, questions: local.questions }
-            : form;
-        });
-        formsRef.current = mergedForms;
-        setForms(mergedForms);
-        setIsLoaded(true);
-      })
-      .catch(() => {
-        // Keep the local catalog as a temporary offline fallback.
-      });
-
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key === REQUEST_FORMS_STORAGE_KEY) {
-        syncFromStorage();
-      }
-    };
-
-    window.addEventListener("storage", handleStorage);
-    window.addEventListener(
-      REQUEST_FORMS_UPDATED_EVENT,
-      syncFromStorage
-    );
-
-    return () => {
-      window.removeEventListener("storage", handleStorage);
-      window.removeEventListener(
-        REQUEST_FORMS_UPDATED_EVENT,
-        syncFromStorage
-      );
-    };
-  }, [syncFromStorage]);
-
-  const commit = React.useCallback(
-    (nextForms: RequestFormDefinition[]) => {
-      formsRef.current = nextForms;
-      setForms(nextForms);
-      persistRequestForms(nextForms);
-    },
-    []
-  );
-
-  const addForm = React.useCallback(
-    (input: RequestFormInput) => {
-      const currentForms = formsRef.current;
-
-      const form: RequestFormDefinition = {
-        ...input,
-        id: createUniqueFormId(input.title, currentForms),
-        template: "general",
-      };
-
-      commit([...currentForms, form]);
-      void fetch("/api/request-forms", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
-      });
-
-      return form;
-    },
-    [commit]
-  );
-
-  const updateForm = React.useCallback(
-    (id: string, input: RequestFormInput) => {
-      commit(
-        formsRef.current.map((form) =>
-          form.id === id ? { ...form, ...input } : form
-        )
-      );
-      const next = formsRef.current.find((form) => form.id === id);
-      if (next) {
-        void fetch("/api/request-forms", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...next, ...input }),
-        });
-      }
-    },
-    [commit]
-  );
-
-  const deleteForm = React.useCallback(
-    (id: string) => {
-      commit(formsRef.current.filter((form) => form.id !== id));
-      void fetch(`/api/request-forms?id=${encodeURIComponent(id)}`, {
-        method: "DELETE",
-      });
-    },
-    [commit]
-  );
-
-  return {
-    forms,
-    isLoaded,
-    addForm,
-    updateForm,
-    deleteForm,
-  };
+export function UserManagementPanel() {
+  const [query, setQuery] = React.useState("");
+  const [users, setUsers] = React.useState<ManagedUser[]>([]);
+  const [message, setMessage] = React.useState("");
+  const [savingUser, setSavingUser] = React.useState<string | null>(null);
+  const [roleFilter, setRoleFilter] = React.useState("All roles");
+  const load = React.useCallback(() => { fetch(`/api/admin/users?q=${encodeURIComponent(query)}`).then((response) => response.json()).then((body) => setUsers(body.users ?? [])); }, [query]);
+  React.useEffect(() => { load(); }, [load]);
+  const visibleUsers = users.filter((user) => roleFilter === "All roles" || (user.roles[0]?.role ?? "User") === roleFilter);
+  const update = async (userId: string, field: string, value: string) => { setSavingUser(userId); setMessage(""); const response = await fetch("/api/admin/users", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ userId, [field]: value }) }); const body = await response.json(); setMessage(response.ok ? "Changes saved successfully." : body.error ?? "Unable to update user"); setSavingUser(null); if (response.ok) load(); };
+  return <Card className="mb-6"><CardHeader><CardTitle className="flex items-center gap-2"><UserRoundCheck className="h-4 w-4 text-primary" />User access management</CardTitle><p className="text-sm text-muted-foreground">Search the directory and update one user at a time without leaving this page.</p></CardHeader><CardContent><div className="mb-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_180px]"><div className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><Input value={query} onChange={(event) => setQuery(event.target.value)} className="pl-9" placeholder="Search name, email or department" /></div><Select value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}><option>All roles</option><option>User</option><option>Approver</option><option>Manager</option><option>Admin</option><option>Super Admin</option></Select></div><div className="mb-2 flex items-center justify-between text-xs text-muted-foreground"><span>{visibleUsers.length} users shown</span><span>Showing up to 5 at a time</span></div><div className="max-h-[27rem] overflow-y-auto rounded-lg border border-border"><div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead className="sticky top-0 z-10 border-b border-border bg-muted text-xs uppercase text-muted-foreground"><tr><th className="px-3 py-2">User</th><th className="px-3 py-2">Department</th><th className="px-3 py-2">Role</th><th className="px-3 py-2">Status</th></tr></thead><tbody className="divide-y divide-border">{visibleUsers.slice(0, 5).map((user) => <tr key={user.id}><td className="px-3 py-3"><p className="font-medium">{user.display_name}</p><p className="text-xs text-muted-foreground">{user.email} · {user.job_title || "No title"}</p></td><td className="px-3 py-3"><Input defaultValue={user.department} onBlur={(event) => { if (event.target.value !== user.department) update(user.id, "department", event.target.value); }} /></td><td className="px-3 py-3"><Select value={user.roles[0]?.role ?? "User"} onChange={(event) => update(user.id, "role", event.target.value)}><option>User</option><option>Approver</option><option>Manager</option><option>Admin</option><option>Super Admin</option></Select></td><td className="px-3 py-3"><Button variant="ghost" size="sm" disabled={savingUser === user.id} onClick={() => update(user.id, "status", user.account_status === "active" ? "inactive" : "active")}>{savingUser === user.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Badge variant={user.account_status === "active" ? "success" : "neutral"}>{user.account_status === "active" ? "Active" : "Inactive"}</Badge>}</Button></td></tr>)}</tbody></table></div>{visibleUsers.length > 5 && <p className="border-t border-border bg-muted/40 px-3 py-2 text-center text-xs text-muted-foreground">Refine your search to see more users.</p>}</div>{!visibleUsers.length && <p className="py-8 text-center text-sm text-muted-foreground">No synchronized users found.</p>}{message && <p className="mt-3 flex items-center gap-1.5 rounded-md border border-success/20 bg-success/5 px-3 py-2 text-sm text-success"><Check className="h-4 w-4" />{message}</p>}</CardContent></Card>;
 }
