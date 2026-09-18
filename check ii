@@ -1,587 +1,863 @@
-/**
- * Ordered, versioned SQL migrations. Each runs once inside a transaction and is
- * recorded in `schema_migrations`. Never edit an applied migration — add a new
- * one. Migrations must be idempotent-safe (use IF NOT EXISTS where possible).
- */
-export interface Migration {
-  id: string;
-  sql: string;
+import { q, q1, withTransaction } from "@/lib/db/client";
+import {
+  notifyStatusChanged,
+  notifyAssignmentChanged,
+  notifyApprovalDecision,
+  notifyApprovalRequired,
+} from "@/lib/services/notifications";
+import { getPublishedWorkflow, validateWorkflowTransition } from "@/lib/services/admin-platform";
+
+export type RequestType = string;
+
+const REFERENCE_PREFIX: Record<string, string> = {
+  general: "GEN",
+  "hr-onboarding": "ONB",
+  "hr-offboarding": "OFB",
+  "infosec-exception": "EXC",
+};
+
+function getReferencePrefix(requestType: string): string {
+  const known = REFERENCE_PREFIX[requestType];
+  if (known) return known;
+  const prefix = requestType.replace(/[^a-z0-9]/gi, "").slice(0, 3).toUpperCase();
+  return prefix || "REQ";
 }
 
-export const MIGRATIONS: Migration[] = [
-  {
-    id: "001_core_schema",
-    sql: /* sql */ `
-      -- ================================================================
-      -- Organization users (synced from Microsoft Entra ID)
-      -- ================================================================
+export interface ActorRef {
+  id: string;
+  name: string;
+  email: string;
+}
 
-      CREATE TABLE IF NOT EXISTS organization_users (
-        id TEXT PRIMARY KEY,
-        display_name TEXT NOT NULL DEFAULT '',
-        email TEXT NOT NULL,
-        department TEXT NOT NULL DEFAULT '',
-        job_title TEXT NOT NULL DEFAULT '',
-        office_location TEXT NOT NULL DEFAULT '',
-        contact_number TEXT NOT NULL DEFAULT '',
-        manager_name TEXT NOT NULL DEFAULT 'N/A',
-        manager_email TEXT NOT NULL DEFAULT 'N/A',
-        profile_photo_url TEXT NOT NULL DEFAULT '',
-        account_status TEXT NOT NULL DEFAULT 'active',
-        last_synced_at TIMESTAMPTZ,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+export interface ApproverInput {
+  id: string;
+  name: string;
+  email: string;
+  status?: string;
+  comment?: string;
+}
+
+export interface CreateRequestInput {
+  requestType: RequestType;
+  title: string;
+  description?: string;
+  status?: string;
+  priority?: string;
+  requestedBy: ActorRef;
+  requestedFor?: ActorRef | null;
+  requesterDepartment?: string;
+  requestedForDepartment?: string;
+  department?: string;
+  assignedTo?: ActorRef | null;
+  assignedDepartment?: string;
+  approvers?: ApproverInput[];
+  followers?: ActorRef[];
+  payload?: Record<string, unknown>;
+}
+
+export interface CreatedRequest {
+  id: string;
+  reference: string;
+}
+
+/** Creates a request and all related rows atomically, logging the first activity. */
+export async function createRequest(
+  input: CreateRequestInput
+): Promise<CreatedRequest> {
+  const workflow = await getPublishedWorkflow(input.requestType, input.department, input.priority);
+  const workflowInitialStatus = workflow?.definition?.initialStatus;
+  const initialStatus = typeof workflowInitialStatus === "string"
+    ? workflowInitialStatus
+    : input.status ?? "Draft";
+  return withTransaction(async (client) => {
+    const seq = await client.query<{ n: string }>(
+      "SELECT nextval('request_reference_seq') AS n"
+    );
+    const reference = `${getReferencePrefix(input.requestType)}-${String(
+      seq.rows[0].n
+    ).padStart(6, "0")}`;
+
+    const inserted = await client.query<{ id: string }>(
+      `INSERT INTO service_requests
+         (reference, request_type, title, description, status, priority,
+          requested_by, requester_name, requester_email, requester_department,
+          requested_for, requested_for_name, requested_for_email, requested_for_department,
+          department, assigned_to, assigned_to_name, assigned_department, payload)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+       RETURNING id`,
+      [
+        reference,
+        input.requestType,
+        input.title,
+        input.description ?? "",
+        initialStatus,
+        input.priority ?? "Medium",
+        input.requestedBy.id,
+        input.requestedBy.name,
+        input.requestedBy.email,
+        input.requesterDepartment ?? "",
+        input.requestedFor?.id ?? null,
+        input.requestedFor?.name ?? null,
+        input.requestedFor?.email ?? null,
+        input.requestedForDepartment ?? "",
+        input.department ?? "",
+        input.assignedTo?.id ?? null,
+        input.assignedTo?.name ?? null,
+        input.assignedDepartment ?? "",
+        JSON.stringify(input.payload ?? {}),
+      ]
+    );
+    const requestId = inserted.rows[0].id;
+
+    for (const approver of input.approvers ?? []) {
+      await client.query(
+        `INSERT INTO request_approvers
+           (request_id, approver_id, approver_name, approver_email, approval_status, approval_comment)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (request_id, approver_id) DO NOTHING`,
+        [
+          requestId,
+          approver.id,
+          approver.name,
+          approver.email,
+          approver.status ?? "Active",
+          approver.comment ?? "",
+        ]
+      );
+    }
+
+    for (const follower of input.followers ?? []) {
+      await client.query(
+        `INSERT INTO request_followers
+           (request_id, user_id, user_name, user_email, added_by)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (request_id, user_id) DO NOTHING`,
+        [requestId, follower.id, follower.name, follower.email, input.requestedBy.id]
+      );
+    }
+
+    if (input.assignedTo || input.assignedDepartment) {
+      await client.query(
+        `INSERT INTO request_assignments
+           (request_id, assigned_to, assigned_to_name, assigned_department, assigned_by)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [
+          requestId,
+          input.assignedTo?.id ?? null,
+          input.assignedTo?.name ?? null,
+          input.assignedDepartment ?? "",
+          input.requestedBy.id,
+        ]
+      );
+    }
+
+    await client.query(
+      `INSERT INTO request_activity
+         (request_id, activity_type, description, performed_by, performed_by_name)
+       VALUES ($1, 'Request Created', $2, $3, $4)`,
+      [
+        requestId,
+        `created request ${reference}.`,
+        input.requestedBy.id,
+        input.requestedBy.name,
+      ]
+    );
+
+    return { id: requestId, reference };
+  });
+}
+
+export interface RequestListItem {
+  id: string;
+  reference: string;
+  request_type: string;
+  title: string;
+  status: string;
+  priority: string;
+  department: string;
+  requester_name: string;
+  assigned_to_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListRequestsOptions {
+  status?: string;
+  department?: string;
+  requestType?: string;
+  priority?: string;
+  open?: boolean;
+  fromDate?: string;
+  toDate?: string;
+  requestedBy?: string;
+  assignedTo?: string; // NEW
+  assignedToMode?: "eq" | "neq";
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** Paginated, filterable request list (newest first). */
+export async function listRequests(
+  options: ListRequestsOptions = {}
+): Promise<{ items: RequestListItem[]; total: number }> {
+  const conditions = ["deleted_at IS NULL"];
+  const params: unknown[] = [];
+
+  const add = (clause: string, value: unknown) => {
+    params.push(value);
+    conditions.push(clause.replace("$?", `$${params.length}`));
+  };
+
+  if (options.status) add("status = $?", options.status);
+  if (options.department) add("lower(department) = lower($?)", options.department);
+  if (options.requestType) add("request_type = $?", options.requestType);
+  if (options.priority) add("priority = $?", options.priority);
+  if (options.open) {
+    conditions.push(
+      "status IN ('New','Assigned','In Progress','On Hold')"
+    );
+  }
+
+  if (options.fromDate)
+    add("created_at >= $?::date", options.fromDate);
+
+  if (options.toDate)
+    add(
+      "created_at < ($?::date + interval '1 day')",
+      options.toDate
+    );
+  if (options.assignedTo) {
+    const isNotEquals = options.assignedToMode === "neq";
+
+    if (options.assignedTo === "__UNASSIGNED__") {
+      conditions.push(
+        isNotEquals
+          ? "assigned_to_name IS NOT NULL"
+          : "assigned_to_name IS NULL"
+      );
+    } else {
+      add(
+        isNotEquals
+          ? "assigned_to_name <> $?"
+          : "assigned_to_name = $?",
+        options.assignedTo
+      );
+    }
+  }
+  if (options.requestedBy)
+    add("requested_by = $?", options.requestedBy);
+
+  if (options.search) {
+    params.push(`%${options.search.trim()}%`);
+    const p = `$${params.length}`;
+    conditions.push(
+      `(reference ILIKE ${p} OR title ILIKE ${p} OR requester_name ILIKE ${p})`
+    );
+  }
+
+  const where = `WHERE ${conditions.join(" AND ")}`;
+  const limit = Math.min(Math.max(options.limit ?? 25, 1), 100);
+  const offset = Math.max(options.offset ?? 0, 0);
+
+  const totalRow = await q1<{ n: string }>(
+    `SELECT COUNT(*)::int AS n FROM service_requests ${where}`,
+    params
+  );
+
+  const items = await q<RequestListItem>(
+    `SELECT id, reference, request_type, title, status, priority, department,
+            requester_name, assigned_to_name, created_at, updated_at
+       FROM service_requests ${where}
+      ORDER BY created_at DESC
+      LIMIT ${limit} OFFSET ${offset}`,
+    params
+  );
+
+  return { items, total: Number(totalRow?.n ?? 0) };
+}
+
+/** Resolves the internal UUID for a request reference (null when missing). */
+export async function getRequestIdByReference(
+  reference: string
+): Promise<string | null> {
+  const row = await q1<{ id: string }>(
+    `SELECT id FROM service_requests WHERE reference = $1 AND deleted_at IS NULL`,
+    [reference]
+  );
+  return row?.id ?? null;
+}
+
+/** Full request with approvers, followers, comments and activity timeline. */
+export async function getRequestByReference(reference: string) {
+  const request = await q1(
+    `SELECT * FROM service_requests WHERE reference = $1 AND deleted_at IS NULL`,
+    [reference]
+  );
+  if (!request) return null;
+  const id = (request as { id: string }).id;
+
+  const [approvers, followers, comments, activity] = await Promise.all([
+    q("SELECT * FROM request_approvers WHERE request_id = $1 ORDER BY created_at", [id]),
+    q("SELECT * FROM request_followers WHERE request_id = $1 ORDER BY added_at", [id]),
+    q("SELECT * FROM request_comments WHERE request_id = $1 ORDER BY created_at", [id]),
+    q("SELECT * FROM request_activity WHERE request_id = $1 ORDER BY created_at", [id]),
+  ]);
+
+  return { request, approvers, followers, comments, activity };
+}
+
+/** Updates status and records a status-change activity. */
+export async function updateRequestStatus(
+  requestId: string,
+  status: string,
+  actor: ActorRef
+): Promise<void> {
+  await withTransaction(async (client) => {
+    const completed =
+      status === "Resolved" || status === "Closed" ? "now()" : "completed_at";
+    await client.query(
+      `UPDATE service_requests
+          SET status = $2, updated_at = now(), completed_at = ${completed}
+        WHERE id = $1`,
+      [requestId, status]
+    );
+    await client.query(
+      `INSERT INTO request_activity
+         (request_id, activity_type, description, performed_by, performed_by_name)
+       VALUES ($1, 'Status Changed', $2, $3, $4)`,
+      [requestId, `changed the status to ${status}.`, actor.id, actor.name]
+    );
+  });
+
+  void notifyStatusChanged(
+    requestId,
+    "", // old status unavailable in this method
+    status,
+    actor
+  );
+}
+
+export interface ManageUpdateInput {
+  status?: string;
+  priority?: string;
+  assignedToId?: string | null;
+  assignedToName?: string | null;
+  assignedDepartment?: string | null;
+}
+
+interface ManagedRow {
+  status: string;
+  priority: string;
+  assigned_to: string | null;
+  assigned_to_name: string | null;
+  assigned_department: string;
+}
+
+/**
+ * Applies admin/ops changes to status, priority and assignment atomically,
+ * logging one activity entry per field that actually changed. Returns the
+ * number of changes persisted (0 when nothing differed).
+ */
+export async function updateRequestManaged(
+  requestId: string,
+  changes: ManageUpdateInput,
+  actor: ActorRef
+): Promise<number> {
+  if (changes.status !== undefined) {
+    const current = await q1<{ request_type: string; status: string }>(
+      `SELECT request_type, status FROM service_requests WHERE id = $1 AND deleted_at IS NULL`,
+      [requestId]
+    );
+    if (!current) throw new Error("Request not found");
+    await validateWorkflowTransition(current.request_type, current.status, changes.status);
+  }
+  const result = await withTransaction(async (client) => {
+    const cur = await client.query<ManagedRow>(
+      `SELECT status, priority, assigned_to, assigned_to_name, assigned_department
+         FROM service_requests
+        WHERE id = $1 AND deleted_at IS NULL
+        FOR UPDATE`,
+      [requestId]
+    );
+    if (cur.rowCount === 0) throw new Error("Request not found");
+    const row = cur.rows[0];
+
+    let assignmentChangedForNotification = false;
+
+    let statusChangedForNotification = false;
+    let oldStatusForNotification = "";
+    let newStatusForNotification = "";
+
+    const params: unknown[] = [requestId];
+    const sets: string[] = [];
+    const activities: { type: string; desc: string }[] = [];
+    const set = (col: string, val: unknown) => {
+      params.push(val);
+      sets.push(`${col} = $${params.length}`);
+    };
+
+    if (changes.status !== undefined && changes.status !== row.status) {
+      statusChangedForNotification = true;
+      oldStatusForNotification = row.status;
+      newStatusForNotification = changes.status;
+
+      set("status", changes.status);
+
+      const completed =
+        changes.status === "Resolved" ||
+        changes.status === "Closed";
+
+      sets.push(
+        `completed_at = ${completed ? "now()" : "completed_at"}`
       );
 
-      CREATE UNIQUE INDEX IF NOT EXISTS uq_org_users_email
-        ON organization_users (lower(email));
+      activities.push({
+        type: "Status Changed",
+        desc: `changed the status from ${row.status} to ${changes.status}.`,
+      });
+    }
 
-      CREATE INDEX IF NOT EXISTS ix_org_users_department
-        ON organization_users (lower(department));
+    if (changes.priority !== undefined && changes.priority !== row.priority) {
+      set("priority", changes.priority);
+      activities.push({
+        type: "Priority Changed",
+        desc: `changed the priority from ${row.priority} to ${changes.priority}.`,
+      });
+    }
 
-      CREATE INDEX IF NOT EXISTS ix_org_users_status
-        ON organization_users (account_status);
+    const nextAssignee = changes.assignedToId ?? null;
+    const nextAssigneeName = changes.assignedToName ?? null;
+    const nextDept =
+      changes.assignedDepartment ?? undefined;
 
-      CREATE INDEX IF NOT EXISTS ix_org_users_name
-        ON organization_users (lower(display_name));
+    const assigneeChanged =
+      changes.assignedToId !== undefined && nextAssignee !== row.assigned_to;
+    const deptChanged =
+      nextDept !== undefined && nextDept !== row.assigned_department;
 
-
-      -- ================================================================
-      -- Role-based access control (identity = email, passwordless)
-      -- ================================================================
-
-      CREATE TABLE IF NOT EXISTS user_roles (
-        id BIGSERIAL PRIMARY KEY,
-        user_email TEXT NOT NULL,
-        role TEXT NOT NULL DEFAULT 'Admin',
-        granted_by TEXT NOT NULL DEFAULT 'system',
-        granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        CONSTRAINT uq_user_role UNIQUE (user_email, role)
+    if (assigneeChanged || deptChanged) {
+      assignmentChangedForNotification = true;
+      if (changes.assignedToId !== undefined) {
+        set("assigned_to", nextAssignee);
+        set("assigned_to_name", nextAssigneeName);
+      }
+      if (nextDept !== undefined) {
+        set("assigned_department", nextDept);
+      }
+      const who = nextAssigneeName || "Unassigned";
+      const where = nextDept || row.assigned_department || "—";
+      activities.push({
+        type: "Assignment Changed",
+        desc: `assigned the request to ${who} (${where}).`,
+      });
+      await client.query(
+        `INSERT INTO request_assignments
+           (request_id, assigned_to, assigned_to_name, assigned_department, assigned_by)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [
+          requestId,
+          nextAssignee,
+          nextAssigneeName,
+          nextDept ?? row.assigned_department,
+          actor.id,
+        ]
       );
+    }
 
-      CREATE INDEX IF NOT EXISTS ix_user_roles_email
-        ON user_roles (lower(user_email));
+    if (sets.length === 0) {
+      return {
+        count: 0,
+        assignmentChanged: false,
+        statusChanged: false,
+        oldStatus: "",
+        newStatus: "",
+      };
+    }
+    await client.query(
+      `UPDATE service_requests
+          SET ${sets.join(", ")}, updated_at = now()
+        WHERE id = $1`,
+      params
+    );
 
-
-      -- ================================================================
-      -- Service requests (all types)
-      -- ================================================================
-
-      CREATE TABLE IF NOT EXISTS service_requests (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        reference TEXT NOT NULL UNIQUE,
-        request_type TEXT NOT NULL,
-        title TEXT NOT NULL,
-        description TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'Draft',
-        priority TEXT NOT NULL DEFAULT 'Medium',
-
-        requested_by TEXT,
-        requester_name TEXT NOT NULL DEFAULT '',
-        requester_email TEXT NOT NULL DEFAULT '',
-
-        requested_for TEXT,
-        requested_for_name TEXT,
-        requested_for_email TEXT,
-
-        department TEXT NOT NULL DEFAULT '',
-        assigned_to TEXT,
-        assigned_to_name TEXT,
-
-        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        completed_at TIMESTAMPTZ,
-        deleted_at TIMESTAMPTZ
+    for (const a of activities) {
+      await client.query(
+        `INSERT INTO request_activity
+           (request_id, activity_type, description, performed_by, performed_by_name)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [requestId, a.type, a.desc, actor.id, actor.name]
       );
+    }
+    return {
+      count: activities.length,
+      assignmentChanged: assignmentChangedForNotification,
+      statusChanged: statusChangedForNotification,
+      oldStatus: oldStatusForNotification,
+      newStatus: newStatusForNotification,
+    };
+  });
 
-      CREATE INDEX IF NOT EXISTS ix_requests_status
-        ON service_requests (status);
+  if (result.assignmentChanged) {
+    void notifyAssignmentChanged(
+      requestId,
+      actor
+    );
+  }
 
-      CREATE INDEX IF NOT EXISTS ix_requests_type
-        ON service_requests (request_type);
+  if (result.statusChanged) {
+    void notifyStatusChanged(
+      requestId,
+      result.oldStatus,
+      result.newStatus,
+      actor
+    );
+  }
 
-      CREATE INDEX IF NOT EXISTS ix_requests_department
-        ON service_requests (lower(department));
+  return result.count;
+}
 
-      CREATE INDEX IF NOT EXISTS ix_requests_requested_by
-        ON service_requests (requested_by);
+/**
+ * Replaces the approver set for a request (admin/ops only). Adds new approvers,
+ * removes ones no longer present, and logs an activity for each change.
+ */
+export async function replaceApprovers(
+  requestId: string,
+  approvers: ApproverInput[],
+  actor: ActorRef
+): Promise<void> {
+  await withTransaction(async (client) => {
+    const existing = await client.query<{
+      approver_id: string;
+      approver_name: string;
+    }>(
+      `SELECT approver_id, approver_name FROM request_approvers WHERE request_id = $1`,
+      [requestId]
+    );
+    const existingIds = new Set(existing.rows.map((r) => r.approver_id));
+    const nextIds = new Set(approvers.map((a) => a.id));
 
-      CREATE INDEX IF NOT EXISTS ix_requests_assigned_to
-        ON service_requests (assigned_to);
+    for (const a of approvers) {
+      if (!existingIds.has(a.id)) {
+        await client.query(
+          `INSERT INTO request_approvers
+             (request_id, approver_id, approver_name, approver_email, approval_status, approval_comment)
+           VALUES ($1,$2,$3,$4,$5,$6)
+           ON CONFLICT (request_id, approver_id) DO NOTHING`,
+          [requestId, a.id, a.name, a.email, a.status ?? "Active", a.comment ?? ""]
+        );
+        await client.query(
+          `INSERT INTO request_activity
+             (request_id, activity_type, description, performed_by, performed_by_name)
+           VALUES ($1, 'Approver Added', $2, $3, $4)`,
+          [requestId, `added ${a.name} as an approver.`, actor.id, actor.name]
+        );
+        void notifyApprovalRequired(
+          requestId,
+          {
+            id: a.id,
+            name: a.name,
+            email: a.email,
+          },
+          actor
+        );
+      }
+    }
 
-      CREATE INDEX IF NOT EXISTS ix_requests_created_at
-        ON service_requests (created_at DESC);
+    for (const e of existing.rows) {
+      if (!nextIds.has(e.approver_id)) {
+        await client.query(
+          `DELETE FROM request_approvers WHERE request_id = $1 AND approver_id = $2`,
+          [requestId, e.approver_id]
+        );
+        await client.query(
+          `INSERT INTO request_activity
+             (request_id, activity_type, description, performed_by, performed_by_name)
+           VALUES ($1, 'Approver Removed', $2, $3, $4)`,
+          [requestId, `removed ${e.approver_name} from the approvers list.`, actor.id, actor.name]
+        );
+      }
+    }
 
-      CREATE INDEX IF NOT EXISTS ix_requests_active
-        ON service_requests (created_at DESC)
-        WHERE deleted_at IS NULL;
+    await client.query(
+      `UPDATE service_requests SET updated_at = now() WHERE id = $1`,
+      [requestId]
+    );
+  });
+}
 
+/**
+ * Records an approver's own decision (status and/or comment). Only the assigned
+ * approver may call this; the caller must enforce identity. Logs activity for
+ * each change made.
+ */
+export async function updateApproverDecision(
+  requestId: string,
+  approverId: string,
+  changes: { status?: string; comment?: string },
+  actor: ActorRef
+): Promise<boolean> {
+  return withTransaction(async (client) => {
+    const cur = await client.query<{
+      approval_status: string;
+      approval_comment: string;
+    }>(
+      `SELECT approval_status, approval_comment
+         FROM request_approvers
+        WHERE request_id = $1 AND approver_id = $2
+        FOR UPDATE`,
+      [requestId, approverId]
+    );
+    if (cur.rowCount === 0) return false;
+    const row = cur.rows[0];
 
-      -- ================================================================
-      -- Approval workflow (1..N approvers per request)
-      -- ================================================================
+    const activities: { type: string; desc: string }[] = [];
 
-      CREATE TABLE IF NOT EXISTS request_approvers (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        request_id UUID NOT NULL
-          REFERENCES service_requests(id) ON DELETE CASCADE,
-
-        approver_id TEXT NOT NULL,
-        approver_name TEXT NOT NULL DEFAULT '',
-        approver_email TEXT NOT NULL DEFAULT '',
-
-        approval_status TEXT NOT NULL DEFAULT 'Active',
-        approval_comment TEXT NOT NULL DEFAULT '',
-        approved_at TIMESTAMPTZ,
-
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-        CONSTRAINT uq_request_approver
-          UNIQUE (request_id, approver_id)
+    if (changes.status !== undefined && changes.status !== row.approval_status) {
+      const approvedAt =
+        changes.status === "Approved" ? "now()" : "approved_at";
+      await client.query(
+        `UPDATE request_approvers
+            SET approval_status = $3, approved_at = ${approvedAt}
+          WHERE request_id = $1 AND approver_id = $2`,
+        [requestId, approverId, changes.status]
       );
+      activities.push({
+        type: "Approval Status Updated",
+        desc:
+          changes.status === "Approved"
+            ? "approved the request."
+            : changes.status === "Rejected"
+              ? "rejected the request."
+              : changes.status === "On Hold"
+                ? "placed the approval on hold."
+                : `updated approval status to ${changes.status}.`,
+      });
+    }
 
-      CREATE INDEX IF NOT EXISTS ix_approvers_request
-        ON request_approvers (request_id);
-
-
-      -- ================================================================
-      -- Assignment history
-      -- ================================================================
-
-      CREATE TABLE IF NOT EXISTS request_assignments (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        request_id UUID NOT NULL
-          REFERENCES service_requests(id) ON DELETE CASCADE,
-
-        assigned_to TEXT,
-        assigned_to_name TEXT,
-        assigned_department TEXT NOT NULL DEFAULT '',
-        assigned_by TEXT,
-        assigned_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    if (
+      changes.comment !== undefined &&
+      changes.comment.trim() &&
+      changes.comment !== row.approval_comment
+    ) {
+      await client.query(
+        `UPDATE request_approvers
+            SET approval_comment = $3
+          WHERE request_id = $1 AND approver_id = $2`,
+        [requestId, approverId, changes.comment]
       );
+      activities.push({
+        type: "Approval Comment Added",
+        desc: "added an approval comment.",
+      });
+    }
 
-      CREATE INDEX IF NOT EXISTS ix_assignments_request
-        ON request_assignments (request_id);
-
-
-      -- ================================================================
-      -- Followers / watchers
-      -- ================================================================
-
-      CREATE TABLE IF NOT EXISTS request_followers (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        request_id UUID NOT NULL
-          REFERENCES service_requests(id) ON DELETE CASCADE,
-
-        user_id TEXT NOT NULL,
-        user_name TEXT NOT NULL DEFAULT '',
-        user_email TEXT NOT NULL DEFAULT '',
-        added_by TEXT,
-        added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-        CONSTRAINT uq_request_follower
-          UNIQUE (request_id, user_id)
+    for (const a of activities) {
+      await client.query(
+        `INSERT INTO request_activity
+           (request_id, activity_type, description, performed_by, performed_by_name)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [requestId, a.type, a.desc, actor.id, actor.name]
       );
+    }
 
-      CREATE INDEX IF NOT EXISTS ix_followers_request
-        ON request_followers (request_id);
-
-      CREATE INDEX IF NOT EXISTS ix_followers_user
-        ON request_followers (user_id);
-
-
-      -- ================================================================
-      -- Comments (chronological)
-      -- ================================================================
-
-      CREATE TABLE IF NOT EXISTS request_comments (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        request_id UUID NOT NULL
-          REFERENCES service_requests(id) ON DELETE CASCADE,
-
-        user_id TEXT,
-        author_name TEXT NOT NULL DEFAULT '',
-        comment TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    if (activities.length > 0) {
+      await client.query(
+        `UPDATE service_requests SET updated_at = now() WHERE id = $1`,
+        [requestId]
       );
-
-      CREATE INDEX IF NOT EXISTS ix_comments_request
-        ON request_comments (request_id, created_at);
-
-
-      -- ================================================================
-      -- Activity timeline / audit trail (never deleted)
-      -- ================================================================
-
-      CREATE TABLE IF NOT EXISTS request_activity (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        request_id UUID NOT NULL
-          REFERENCES service_requests(id) ON DELETE CASCADE,
-
-        activity_type TEXT NOT NULL,
-        description TEXT NOT NULL DEFAULT '',
-        performed_by TEXT,
-        performed_by_name TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    }
+    if (
+      changes.status === "Approved" ||
+      changes.status === "Rejected"
+    ) {
+      void notifyApprovalDecision(
+        requestId,
+        changes.status,
+        actor,
+        changes.comment
       );
+    }
+    return true;
+  });
+}
 
-      CREATE INDEX IF NOT EXISTS ix_activity_request
-        ON request_activity (request_id, created_at);
+export interface RequestAnalytics {
+  total: number;
+  open: number;
+  completed: number;
+  urgent: number;
+  unassigned: number;
 
+  byStatus: Record<string, number>;
+  byPriority: Record<string, number>;
+  byType: Record<string, number>;
+  byDepartment: Record<string, number>;
 
-      -- ================================================================
-      -- Directory sync statistics (singleton row)
-      -- ================================================================
+  byAssignee: Record<string, number>;
+}
 
-      CREATE TABLE IF NOT EXISTS sync_meta (
-        id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-        last_sync_at TIMESTAMPTZ,
-        added INT NOT NULL DEFAULT 0,
-        updated INT NOT NULL DEFAULT 0,
-        removed INT NOT NULL DEFAULT 0,
-        total INT NOT NULL DEFAULT 0
-      );
+export interface RecentActivityItem {
+  id: string;
+  requestId: string;
+  reference: string;
+  activityType: string;
+  description: string;
+  performedByName: string;
+  createdAt: string;
+}
+
+export interface MonthlyTrendItem {
+  month: string;
+  count: number;
+}
+
+/** Aggregated dashboard analytics computed in the database. */
+export async function getRequestAnalytics(): Promise<RequestAnalytics> {
+  const countBy = async (column: string) => {
+    const rows = await q<{ key: string | null; n: string }>(
+      `SELECT ${column} AS key, COUNT(*)::int AS n
+         FROM service_requests
+        WHERE deleted_at IS NULL
+        GROUP BY ${column}`
+    );
+    const out: Record<string, number> = {};
+    for (const row of rows) out[row.key ?? "—"] = Number(row.n);
+    return out;
+  };
+
+  const [
+    byStatus,
+    byPriority,
+    byType,
+    byDepartment,
+    byAssignee,
+    totals,
+  ] = await Promise.all([
+    countBy("status"),
+    countBy("priority"),
+    countBy("request_type"),
+    countBy("department"),
+    countBy("assigned_to_name"),
+    q1<{
+      total: string;
+      open: string;
+      completed: string;
+      urgent: string;
+      unassigned: string;
+    }>(
+      `SELECT
+  COUNT(*)::int AS total,
+  COUNT(*) FILTER (
+    WHERE status IN ('New','Assigned','In Progress','On Hold')
+  )::int AS open,
+
+  COUNT(*) FILTER (
+    WHERE status IN ('Resolved','Closed')
+  )::int AS completed,
+
+  COUNT(*) FILTER (
+    WHERE priority = 'Urgent'
+  )::int AS urgent,
+
+  COUNT(*) FILTER (
+    WHERE assigned_to_name IS NULL
+  )::int AS unassigned
+       FROM service_requests WHERE deleted_at IS NULL`
+    ),
+  ]);
+
+  return {
+    total: Number(totals?.total ?? 0),
+    open: Number(totals?.open ?? 0),
+    completed: Number(totals?.completed ?? 0),
+    urgent: Number(totals?.urgent ?? 0),
+    unassigned: Number(totals?.unassigned ?? 0),
+
+    byStatus,
+    byPriority,
+    byType,
+    byDepartment,
+    byAssignee,
+  };
+}
+
+export async function getRecentActivity(
+  limit = 10
+): Promise<RecentActivityItem[]> {
+  const rows = await q<{
+    id: string;
+    request_id: string;
+    reference: string;
+    activity_type: string;
+    description: string;
+    performed_by_name: string | null;
+    created_at: string;
+  }>(
+    `
+      SELECT
+  ra.id,
+  ra.request_id,
+  sr.reference,
+  ra.activity_type,
+  ra.description,
+  ra.performed_by_name,
+  ra.created_at
+FROM request_activity ra
+INNER JOIN service_requests sr
+  ON sr.id = ra.request_id
+ORDER BY ra.created_at DESC
+LIMIT $1
     `,
-  },
+    [limit]
+  );
 
-  {
-    id: "002_seed_default_admins",
-    sql: /* sql */ `
-      INSERT INTO user_roles (user_email, role, granted_by)
-      VALUES
-        ('nikhil.negi@fareportal.com', 'Admin', 'system'),
-        ('aryaman.sharma@fareportal.com', 'Admin', 'system'),
-        ('itsmautomation@fareportal.com', 'Admin', 'system')
-      ON CONFLICT (user_email, role) DO NOTHING;
-    `,
-  },
+  return rows.map((r) => ({
+    id: r.id,
+    requestId: r.request_id,
+    reference: r.reference,
+    activityType: r.activity_type,
+    description: r.description,
+    performedByName: r.performed_by_name ?? "System",
+    createdAt: r.created_at,
+  }));
+}
 
-  {
-    id: "003_request_reference_sequence",
-    sql: /* sql */ `
-      CREATE SEQUENCE IF NOT EXISTS request_reference_seq START 1000;
-    `,
-  },
+export async function getMonthlyRequestTrend(): Promise<
+  MonthlyTrendItem[]
+> {
+  const rows = await q<{
+    month: string;
+    count: string;
+    month_date: Date;
+  }>(
+    `
+      SELECT
+        date_trunc('month', created_at) AS month_date,
+        to_char(date_trunc('month', created_at), 'Mon YYYY') AS month,
+        COUNT(*)::int AS count
+      FROM service_requests
+      WHERE deleted_at IS NULL
+        AND created_at >= date_trunc('month', now()) - interval '5 months'
+      GROUP BY month_date, month
+      ORDER BY month_date
+    `
+  );
 
-  {
-    id: "004_request_department_columns",
-    sql: /* sql */ `
-      ALTER TABLE service_requests
-        ADD COLUMN IF NOT EXISTS requester_department
-          TEXT NOT NULL DEFAULT '',
-        ADD COLUMN IF NOT EXISTS requested_for_department
-          TEXT NOT NULL DEFAULT '';
-    `,
-  },
+  return rows.map((r) => ({
+    month: r.month,
+    count: Number(r.count),
+  }));
+}
 
-  {
-    id: "005_request_assigned_department",
-    sql: /* sql */ `
-      ALTER TABLE service_requests
-        ADD COLUMN IF NOT EXISTS assigned_department
-          TEXT NOT NULL DEFAULT '';
-    `,
-  },
+export async function listAssignees(): Promise<string[]> {
+  const rows = await q<{ assigned_to_name: string }>(
+    `SELECT DISTINCT assigned_to_name
+       FROM service_requests
+      WHERE assigned_to_name IS NOT NULL
+        AND assigned_to_name <> ''
+   ORDER BY assigned_to_name`
+  );
 
-  {
-    id: "006_request_attachments",
-    sql: /* sql */ `
-      CREATE TABLE IF NOT EXISTS request_attachments (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-
-        request_id UUID
-          REFERENCES service_requests(id)
-          ON DELETE CASCADE,
-
-        file_name TEXT NOT NULL,
-        file_type TEXT NOT NULL,
-        file_size BIGINT NOT NULL,
-
-        file_data BYTEA NOT NULL,
-
-        uploaded_by TEXT NOT NULL DEFAULT '',
-        uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-
-      CREATE INDEX IF NOT EXISTS ix_request_attachments_request
-        ON request_attachments (request_id);
-    `,
-  },
-
-  {
-    id: "007_attachment_nullable_request",
-    sql: /* sql */ `
-      ALTER TABLE request_attachments
-        ALTER COLUMN request_id DROP NOT NULL;
-    `,
-  },
-
-  {
-    id: "008_notifications",
-    sql: /* sql */ `
-      -- ================================================================
-      -- In-app notifications (bell dropdown / notification center)
-      -- ================================================================
-
-      CREATE TABLE IF NOT EXISTS notifications (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-
-        user_id TEXT NOT NULL,
-        user_email TEXT NOT NULL DEFAULT '',
-
-        notification_type TEXT NOT NULL,
-        title TEXT NOT NULL,
-        message TEXT NOT NULL DEFAULT '',
-
-        request_id UUID
-          REFERENCES service_requests(id)
-          ON DELETE CASCADE,
-
-        request_reference TEXT,
-        link TEXT,
-
-        actor_name TEXT NOT NULL DEFAULT '',
-
-        is_read BOOLEAN NOT NULL DEFAULT FALSE,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        read_at TIMESTAMPTZ
-      );
-
-      CREATE INDEX IF NOT EXISTS ix_notifications_user
-        ON notifications (user_id, created_at DESC);
-
-      CREATE INDEX IF NOT EXISTS ix_notifications_unread
-        ON notifications (user_id)
-        WHERE is_read = FALSE;
-    `,
-  },
-
-  {
-    id: "009_notification_log",
-    sql: /* sql */ `
-      -- ================================================================
-      -- Notification delivery audit log (email/teams observability)
-      -- ================================================================
-
-      CREATE TABLE IF NOT EXISTS notification_log (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-
-        request_id UUID
-          REFERENCES service_requests(id)
-          ON DELETE SET NULL,
-
-        request_reference TEXT,
-
-        channel TEXT NOT NULL DEFAULT 'email',
-
-        recipient_email TEXT NOT NULL DEFAULT '',
-
-        notification_type TEXT NOT NULL,
-
-        subject TEXT NOT NULL DEFAULT '',
-
-        status TEXT NOT NULL DEFAULT 'pending',
-
-        error_message TEXT,
-
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        sent_at TIMESTAMPTZ
-      );
-
-      CREATE INDEX IF NOT EXISTS ix_notification_log_request
-        ON notification_log (request_id, created_at DESC);
-
-      CREATE INDEX IF NOT EXISTS ix_notification_log_status
-        ON notification_log (status);
-    `,
-  },
-
-  {
-    id: "010_administration_center",
-    sql: /* sql */ `
-      CREATE TABLE IF NOT EXISTS admin_departments (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        name TEXT NOT NULL,
-        code TEXT NOT NULL,
-        description TEXT NOT NULL DEFAULT '',
-        is_active BOOLEAN NOT NULL DEFAULT TRUE,
-        created_by TEXT NOT NULL DEFAULT '',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        CONSTRAINT uq_admin_department_code UNIQUE (code)
-      );
-      CREATE INDEX IF NOT EXISTS ix_admin_departments_active ON admin_departments (is_active, name);
-
-      CREATE TABLE IF NOT EXISTS admin_categories (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        name TEXT NOT NULL,
-        slug TEXT NOT NULL,
-        parent_id UUID REFERENCES admin_categories(id) ON DELETE SET NULL,
-        description TEXT NOT NULL DEFAULT '',
-        is_active BOOLEAN NOT NULL DEFAULT TRUE,
-        created_by TEXT NOT NULL DEFAULT '',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        CONSTRAINT uq_admin_category_slug UNIQUE (slug)
-      );
-      CREATE INDEX IF NOT EXISTS ix_admin_categories_parent ON admin_categories (parent_id, is_active, name);
-
-      CREATE TABLE IF NOT EXISTS approval_policies (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        name TEXT NOT NULL,
-        request_type TEXT NOT NULL DEFAULT '*',
-        department_code TEXT,
-        priority TEXT,
-        is_active BOOLEAN NOT NULL DEFAULT TRUE,
-        created_by TEXT NOT NULL DEFAULT '',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-      CREATE INDEX IF NOT EXISTS ix_approval_policies_match ON approval_policies (request_type, department_code, priority, is_active);
-
-      CREATE TABLE IF NOT EXISTS approval_policy_steps (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        policy_id UUID NOT NULL REFERENCES approval_policies(id) ON DELETE CASCADE,
-        step_order INT NOT NULL,
-        name TEXT NOT NULL,
-        approver_type TEXT NOT NULL,
-        approver_value TEXT NOT NULL,
-        timeout_hours INT NOT NULL DEFAULT 48,
-        escalation_value TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        CONSTRAINT uq_approval_policy_step UNIQUE (policy_id, step_order)
-      );
-
-      CREATE TABLE IF NOT EXISTS admin_permissions (
-        role TEXT NOT NULL,
-        permission TEXT NOT NULL,
-        granted BOOLEAN NOT NULL DEFAULT TRUE,
-        updated_by TEXT NOT NULL DEFAULT '',
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (role, permission)
-      );
-      INSERT INTO admin_permissions (role, permission) VALUES
-        ('User', 'requests.view'), ('Approver', 'requests.view'), ('Approver', 'approvals.decide'),
-        ('Manager', 'requests.view'), ('Manager', 'approvals.decide'), ('Admin', 'admin.view'),
-        ('Admin', 'users.manage'), ('Admin', 'forms.manage'), ('Admin', 'workflows.manage'),
-        ('Admin', 'reports.export'), ('Admin', 'settings.manage'), ('Super Admin', 'admin.manage'),
-        ('Super Admin', 'rbac.manage') ON CONFLICT (role, permission) DO NOTHING;
-
-      CREATE TABLE IF NOT EXISTS admin_audit_logs (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        actor_id TEXT,
-        actor_email TEXT NOT NULL DEFAULT '',
-        action TEXT NOT NULL,
-        resource_type TEXT NOT NULL,
-        resource_id TEXT,
-        old_value JSONB,
-        new_value JSONB,
-        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-      CREATE INDEX IF NOT EXISTS ix_admin_audit_created ON admin_audit_logs (created_at DESC);
-      CREATE INDEX IF NOT EXISTS ix_admin_audit_resource ON admin_audit_logs (resource_type, resource_id);
-      CREATE INDEX IF NOT EXISTS ix_admin_audit_actor ON admin_audit_logs (lower(actor_email));
-    `,
-  },
-
-  {
-    id: "011_metadata_platform",
-    sql: /* sql */ `
-      CREATE TABLE IF NOT EXISTS request_form_definitions (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        form_key TEXT NOT NULL,
-        name TEXT NOT NULL,
-        description TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'draft',
-        active_version INT NOT NULL DEFAULT 1,
-        created_by TEXT NOT NULL DEFAULT '',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        CONSTRAINT uq_request_form_key UNIQUE (form_key)
-      );
-
-      CREATE TABLE IF NOT EXISTS request_form_versions (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        form_id UUID NOT NULL REFERENCES request_form_definitions(id) ON DELETE CASCADE,
-        version INT NOT NULL,
-        definition JSONB NOT NULL DEFAULT '{}'::jsonb,
-        status TEXT NOT NULL DEFAULT 'draft',
-        created_by TEXT NOT NULL DEFAULT '',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        CONSTRAINT uq_request_form_version UNIQUE (form_id, version)
-      );
-
-      CREATE TABLE IF NOT EXISTS workflow_definitions (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        workflow_key TEXT NOT NULL UNIQUE,
-        name TEXT NOT NULL,
-        request_type TEXT NOT NULL DEFAULT '*',
-        status TEXT NOT NULL DEFAULT 'draft',
-        active_version INT NOT NULL DEFAULT 1,
-        created_by TEXT NOT NULL DEFAULT '',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-
-      CREATE TABLE IF NOT EXISTS workflow_versions (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        workflow_id UUID NOT NULL REFERENCES workflow_definitions(id) ON DELETE CASCADE,
-        version INT NOT NULL,
-        definition JSONB NOT NULL DEFAULT '{}'::jsonb,
-        status TEXT NOT NULL DEFAULT 'draft',
-        created_by TEXT NOT NULL DEFAULT '',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        CONSTRAINT uq_workflow_version UNIQUE (workflow_id, version)
-      );
-
-      CREATE TABLE IF NOT EXISTS notification_definitions (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        event_key TEXT NOT NULL UNIQUE,
-        name TEXT NOT NULL,
-        enabled BOOLEAN NOT NULL DEFAULT TRUE,
-        channels JSONB NOT NULL DEFAULT '["in-app"]'::jsonb,
-        template JSONB NOT NULL DEFAULT '{}'::jsonb,
-        updated_by TEXT NOT NULL DEFAULT '',
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-
-      CREATE TABLE IF NOT EXISTS report_definitions (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        name TEXT NOT NULL,
-        report_key TEXT NOT NULL UNIQUE,
-        definition JSONB NOT NULL DEFAULT '{}'::jsonb,
-        created_by TEXT NOT NULL DEFAULT '',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-
-      CREATE TABLE IF NOT EXISTS portal_settings (
-        setting_key TEXT PRIMARY KEY,
-        setting_value JSONB NOT NULL DEFAULT '{}'::jsonb,
-        updated_by TEXT NOT NULL DEFAULT '',
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-
-      CREATE TABLE IF NOT EXISTS feature_flags (
-        flag_key TEXT PRIMARY KEY,
-        enabled BOOLEAN NOT NULL DEFAULT FALSE,
-        description TEXT NOT NULL DEFAULT '',
-        updated_by TEXT NOT NULL DEFAULT '',
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-
-      CREATE TABLE IF NOT EXISTS user_permission_overrides (
-        user_id TEXT NOT NULL,
-        permission TEXT NOT NULL,
-        granted BOOLEAN NOT NULL,
-        reason TEXT NOT NULL DEFAULT '',
-        updated_by TEXT NOT NULL DEFAULT '',
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (user_id, permission)
-      );
-    `,
-  },
-];
+  return rows.map((r) => r.assigned_to_name);
+}
