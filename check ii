@@ -1,708 +1,116 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
-import { z } from "zod";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { Controller, useFieldArray, useForm } from "react-hook-form";
-import {
-  ArrowDown,
-  ArrowUp,
-  ExternalLink,
-  FilePlus2,
-  Pencil,
-  Plus,
-  Trash2,
-} from "lucide-react";
-import { useRequestFormCatalog } from "@/components/request-forms/useRequestFormCatalog";
-import { Badge } from "@/components/ui/badge";
-import { Button, buttonVariants } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Dialog } from "@/components/ui/dialog";
-import { FieldError } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import {
-  getRequestFormHref,
-  REQUEST_FORM_ACCENT_NAMES,
-  REQUEST_FORM_ACCENT_OPTIONS,
-  REQUEST_FORM_ACCENTS,
-  REQUEST_FORM_ICON_NAMES,
-  REQUEST_FORM_ICON_OPTIONS,
-  REQUEST_FORM_ICONS,
-  REQUEST_FORM_STATUSES,
-  REQUEST_FORM_STATUS_OPTIONS,
-  MAX_REQUEST_FORM_QUESTIONS,
-  REQUEST_QUESTION_TYPES,
-  type RequestFormDefinition,
-  type RequestFormInput,
-  type RequestFormStatus,
-} from "@/lib/service-categories";
+import { createPortal } from "react-dom";
+import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const requestQuestionEditorSchema = z
-  .object({
-    id: z.string().min(1),
-    label: z
-      .string()
-      .trim()
-      .min(2, "Question must be at least 2 characters")
-      .max(160, "Question must be 160 characters or fewer"),
-    type: z.enum(REQUEST_QUESTION_TYPES),
-    required: z.boolean(),
-    helpText: z
-      .string()
-      .trim()
-      .max(240, "Help text must be 240 characters or fewer"),
-    optionsText: z.string().max(1000, "Options are too long"),
-  })
-  .superRefine((question, context) => {
-    if (question.type !== "select") return;
-
-    const options = parseOptionsText(question.optionsText);
-    if (options.length < 2) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["optionsText"],
-        message: "Add at least two dropdown options",
-      });
-    } else if (new Set(options.map((option) => option.toLowerCase())).size !== options.length) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["optionsText"],
-        message: "Dropdown options must be unique",
-      });
-    }
-  });
-
-const requestFormEditorSchema = z.object({
-  title: z
-    .string()
-    .trim()
-    .min(3, "Name must be at least 3 characters")
-    .max(80, "Name must be 80 characters or fewer"),
-  description: z
-    .string()
-    .trim()
-    .min(10, "Description must be at least 10 characters")
-    .max(240, "Description must be 240 characters or fewer"),
-  icon: z.enum(REQUEST_FORM_ICON_NAMES),
-  accent: z.enum(REQUEST_FORM_ACCENT_NAMES),
-  status: z.enum(REQUEST_FORM_STATUSES),
-  questions: z
-    .array(requestQuestionEditorSchema)
-    .max(
-      MAX_REQUEST_FORM_QUESTIONS,
-      `Maximum of ${MAX_REQUEST_FORM_QUESTIONS} questions`
-    ),
-});
-
-type RequestFormEditorValues = z.infer<typeof requestFormEditorSchema>;
-
-const EMPTY_FORM: RequestFormEditorValues = {
-  title: "",
-  description: "",
-  icon: "file-text",
-  accent: "blue",
-  status: "published",
-  questions: [],
-};
-
-const QUESTION_TYPE_OPTIONS = [
-  { value: "short-text", label: "Short text" },
-  { value: "long-text", label: "Long text" },
-  { value: "number", label: "Number" },
-  { value: "date", label: "Date" },
-  { value: "select", label: "Dropdown" },
-  { value: "checkbox", label: "Checkbox" },
-] as const;
-
-function parseOptionsText(value: string): string[] {
-  return value
-    .split(/\r?\n/)
-    .map((option) => option.trim())
-    .filter(Boolean);
+export interface DialogProps {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  description?: string;
+  children?: React.ReactNode;
+  footer?: React.ReactNode;
+  className?: string;
+  hideClose?: boolean;
 }
 
-function createQuestionId(): string {
-  return crypto.randomUUID();
-}
+/** Lightweight accessible modal dialog (dependency-free). */
+export function Dialog({
+  open,
+  onClose,
+  title,
+  description,
+  children,
+  footer,
+  className,
+  hideClose,
+}: DialogProps) {
+  React.useEffect(() => {
+    if (!open) return;
 
-function toRequestFormInput(
-  values: RequestFormEditorValues
-): RequestFormInput {
-  return {
-    title: values.title,
-    description: values.description,
-    icon: values.icon,
-    accent: values.accent,
-    status: values.status,
-    questions: values.questions.map((question) => ({
-      id: question.id,
-      label: question.label,
-      type: question.type,
-      required: question.required,
-      helpText: question.helpText,
-      options:
-        question.type === "select"
-          ? parseOptionsText(question.optionsText)
-          : [],
-    })),
-  };
-}
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
 
-function getStatusLabel(status: RequestFormStatus): string {
-  return (
-    REQUEST_FORM_STATUS_OPTIONS.find((option) => option.value === status)
-      ?.label ?? status
-  );
-}
+    document.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden";
 
-function getStatusVariant(
-  status: RequestFormStatus
-): "success" | "warning" | "neutral" {
-  if (status === "published") return "success";
-  if (status === "coming-soon") return "warning";
-  return "neutral";
-}
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = "";
+    };
+  }, [open, onClose]);
 
-export function RequestFormManager() {
-  const { forms, isLoaded, addForm, updateForm, deleteForm } =
-    useRequestFormCatalog();
-  const [editorOpen, setEditorOpen] = React.useState(false);
-  const [editingId, setEditingId] = React.useState<string | null>(null);
-  const [pendingDelete, setPendingDelete] =
-    React.useState<RequestFormDefinition | null>(null);
-  const [notice, setNotice] = React.useState("");
+  if (!open || typeof document === "undefined") {
+    return null;
+  }
 
-  const {
-    control,
-    register,
-    handleSubmit,
-    reset,
-    setValue,
-    watch,
-    formState: { errors, isSubmitting },
-  } = useForm<RequestFormEditorValues>({
-    resolver: zodResolver(requestFormEditorSchema),
-    defaultValues: EMPTY_FORM,
-  });
-  const {
-    fields: questionFields,
-    append: appendQuestion,
-    remove: removeQuestion,
-    move: moveQuestion,
-  } = useFieldArray({
-    control,
-    name: "questions",
-    keyName: "fieldKey",
-  });
-
-  const selectedIcon = watch("icon");
-  const selectedAccent = watch("accent");
-  const questions = watch("questions");
-
-  const openCreate = () => {
-    setEditingId(null);
-    reset(EMPTY_FORM);
-    setEditorOpen(true);
-  };
-
-  const openEdit = (form: RequestFormDefinition) => {
-    setEditingId(form.id);
-    reset({
-      title: form.title,
-      description: form.description,
-      icon: form.icon,
-      accent: form.accent,
-      status: form.status,
-      questions: form.questions.map((question) => ({
-        id: question.id,
-        label: question.label,
-        type: question.type,
-        required: question.required,
-        helpText: question.helpText,
-        optionsText: question.options.join("\n"),
-      })),
-    });
-    setEditorOpen(true);
-  };
-
-  const saveForm = (values: RequestFormEditorValues) => {
-    const input = toRequestFormInput(values);
-    if (editingId) {
-      updateForm(editingId, input);
-      setNotice(`${values.title} updated.`);
-    } else {
-      const form = addForm(input);
-      setNotice(`${form.title} added.`);
-    }
-    setEditorOpen(false);
-  };
-
-  const cloneForm = (form: RequestFormDefinition) => {
-    const cloned = addForm({
-      title: `${form.title} Copy`,
-      description: form.description,
-      icon: form.icon,
-      accent: form.accent,
-      status: "draft",
-      questions: form.questions,
-    });
-    setNotice(`${cloned.title} created as a draft.`);
-  };
-
-  const togglePublished = (form: RequestFormDefinition) => {
-    updateForm(form.id, {
-      title: form.title,
-      description: form.description,
-      icon: form.icon,
-      accent: form.accent,
-      status: form.status === "published" ? "hidden" : "published",
-      questions: form.questions,
-    });
-    setNotice(`${form.title} ${form.status === "published" ? "deactivated" : "published"}.`);
-  };
-
-  const confirmDelete = () => {
-    if (!pendingDelete) return;
-    deleteForm(pendingDelete.id);
-    setNotice(`${pendingDelete.title} deleted.`);
-    setPendingDelete(null);
-  };
-
-  return (
-    <>
-      <Card className="mb-8">
-        <CardHeader className="flex-row items-center justify-between gap-4">
-          <div>
-            <CardTitle>Request Forms</CardTitle>
-            <CardDescription className="mt-1">
-              Manage the forms displayed in the service catalog.
-            </CardDescription>
-          </div>
-          <Button onClick={openCreate} disabled={!isLoaded}>
-            <Plus className="h-4 w-4" />
-            Add Form
-          </Button>
-        </CardHeader>
-
-        <CardContent className="p-0">
-          <div aria-live="polite" className="sr-only">
-            {notice}
-          </div>
-
-          {!isLoaded ? (
-            <div className="space-y-3 p-5" aria-label="Loading request forms">
-              {Array.from({ length: 3 }, (_, index) => (
-                <div
-                  key={index}
-                  className="h-14 animate-pulse rounded-md bg-muted"
-                />
-              ))}
-            </div>
-          ) : forms.length === 0 ? (
-            <div className="flex min-h-56 flex-col items-center justify-center px-5 py-10 text-center">
-              <FilePlus2 className="h-8 w-8 text-muted-foreground" />
-              <h3 className="mt-3 text-sm font-semibold text-foreground">
-                No request forms
-              </h3>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Add the first form to publish it in the service catalog.
-              </p>
-              <Button className="mt-5" onClick={openCreate}>
-                <Plus className="h-4 w-4" />
-                Add Form
-              </Button>
-            </div>
-          ) : (
-            <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-3">
-              {forms.map((form) => {
-                const Icon = REQUEST_FORM_ICONS[form.icon];
-                return <div key={form.id} className="flex min-h-48 flex-col rounded-lg border border-border bg-card p-4 shadow-sm transition-shadow hover:shadow-md">
-                  <div className="flex items-start justify-between gap-3">
-                    <span className={cn("flex h-10 w-10 items-center justify-center rounded-lg", REQUEST_FORM_ACCENTS[form.accent])}><Icon className="h-5 w-5" /></span>
-                    <Badge variant={getStatusVariant(form.status)}>{getStatusLabel(form.status)}</Badge>
-                  </div>
-                  <h3 className="mt-4 text-sm font-semibold text-foreground">{form.title}</h3>
-                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{form.description}</p>
-                  <div className="mt-3 text-xs text-muted-foreground">Version 1 · {form.questions.length} custom question{form.questions.length === 1 ? "" : "s"}</div>
-                  <div className="mt-auto flex items-center justify-end gap-1 pt-4">
-                    {form.status === "published" && <Link href={getRequestFormHref(form)} className={buttonVariants({ variant: "ghost", size: "icon" })} title={`Preview ${form.title}`} aria-label={`Preview ${form.title}`}><ExternalLink className="h-4 w-4" /></Link>}
-                    <Button variant="ghost" size="icon" title={`Edit ${form.title}`} aria-label={`Edit ${form.title}`} onClick={() => openEdit(form)}><Pencil className="h-4 w-4" /></Button>
-                    <Button variant="ghost" size="icon" title={`Clone ${form.title}`} aria-label={`Clone ${form.title}`} onClick={() => cloneForm(form)}><FilePlus2 className="h-4 w-4" /></Button>
-                    <Button variant="ghost" size="sm" onClick={() => togglePublished(form)}>{form.status === "published" ? "Deactivate" : "Publish"}</Button>
-                    <Button variant="ghost" size="icon" className="text-destructive hover:text-destructive" title={`Delete ${form.title}`} aria-label={`Delete ${form.title}`} onClick={() => setPendingDelete(form)}><Trash2 className="h-4 w-4" /></Button>
-                  </div>
-                </div>;
-              })}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <Dialog
-        open={editorOpen}
-        onClose={() => setEditorOpen(false)}
-        title={editingId ? "Edit Request Form" : "Add Request Form"}
-        description="Configure how this form appears in the service catalog."
-        className="max-h-[calc(100vh-2rem)] max-w-2xl"
-        footer={
-          <>
-            <Button variant="outline" onClick={() => setEditorOpen(false)}>
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              form="request-form-editor"
-              disabled={isSubmitting}
-            >
-              {editingId ? "Save Changes" : "Add Form"}
-            </Button>
-          </>
-        }
-      >
-        <form
-          id="request-form-editor"
-          className="space-y-4 pr-1"
-          onSubmit={handleSubmit(saveForm)}
-        >
-          <div>
-            <Label htmlFor="request-form-title" required>
-              Form Name
-            </Label>
-            <Input
-              id="request-form-title"
-              maxLength={80}
-              invalid={!!errors.title}
-              placeholder="e.g. Software Access Request"
-              {...register("title")}
-            />
-            <FieldError message={errors.title?.message} />
-          </div>
-
-          <div>
-            <Label htmlFor="request-form-description" required>
-              Description
-            </Label>
-            <Textarea
-              id="request-form-description"
-              rows={3}
-              maxLength={240}
-              invalid={!!errors.description}
-              placeholder="A short summary shown on the service catalog card."
-              {...register("description")}
-            />
-            <FieldError message={errors.description?.message} />
-          </div>
-
-          <section aria-labelledby="custom-questions-heading">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h3
-                  id="custom-questions-heading"
-                  className="text-sm font-semibold text-foreground"
-                >
-                  Additional Questions
-                </h3>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  These questions appear after the standard request details.
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={questionFields.length >= MAX_REQUEST_FORM_QUESTIONS}
-                onClick={() =>
-                  appendQuestion({
-                    id: createQuestionId(),
-                    label: "",
-                    type: "short-text",
-                    required: false,
-                    helpText: "",
-                    optionsText: "",
-                  })
-                }
-              >
-                <Plus className="h-4 w-4" />
-                Add Question
-              </Button>
-            </div>
-
-            {questionFields.length === 0 ? (
-              <div className="mt-3 border-y border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
-                No additional questions configured.
-              </div>
-            ) : (
-              <div className="mt-3 space-y-3">
-                {questionFields.map((question, index) => {
-                  const questionType =
-                    questions[index]?.type ?? question.type;
-                  const questionErrors = errors.questions?.[index];
-
-                  return (
-                    <div
-                      key={question.fieldKey}
-                      className="rounded-md border border-border bg-muted/15 p-4"
-                    >
-                      <div className="mb-3 flex items-center justify-between gap-3">
-                        <span className="text-xs font-semibold uppercase text-muted-foreground">
-                          Question {index + 1}
-                        </span>
-                        <div className="flex items-center gap-1">
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            disabled={index === 0}
-                            onClick={() => moveQuestion(index, index - 1)}
-                            title="Move question up"
-                            aria-label={`Move question ${index + 1} up`}
-                          >
-                            <ArrowUp className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            disabled={index === questionFields.length - 1}
-                            onClick={() => moveQuestion(index, index + 1)}
-                            title="Move question down"
-                            aria-label={`Move question ${index + 1} down`}
-                          >
-                            <ArrowDown className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-destructive hover:text-destructive"
-                            onClick={() => removeQuestion(index)}
-                            title="Remove question"
-                            aria-label={`Remove question ${index + 1}`}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </div>
-
-                      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_180px]">
-                        <div>
-                          <Label htmlFor={`question-${index}-label`} required>
-                            Question
-                          </Label>
-                          <Input
-                            id={`question-${index}-label`}
-                            maxLength={160}
-                            invalid={!!questionErrors?.label}
-                            placeholder="What information do you need?"
-                            {...register(`questions.${index}.label`)}
-                          />
-                          <FieldError message={questionErrors?.label?.message} />
-                        </div>
-
-                        <div>
-                          <Label htmlFor={`question-${index}-type`} required>
-                            Answer Type
-                          </Label>
-                          <Select
-                            id={`question-${index}-type`}
-                            invalid={!!questionErrors?.type}
-                            {...register(`questions.${index}.type`)}
-                          >
-                            {QUESTION_TYPE_OPTIONS.map((option) => (
-                              <option key={option.value} value={option.value}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </Select>
-                          <FieldError message={questionErrors?.type?.message} />
-                        </div>
-                      </div>
-
-                      <div className="mt-3">
-                        <Label htmlFor={`question-${index}-help`}>
-                          Help Text
-                        </Label>
-                        <Input
-                          id={`question-${index}-help`}
-                          maxLength={240}
-                          invalid={!!questionErrors?.helpText}
-                          placeholder="Optional guidance shown below the question"
-                          {...register(`questions.${index}.helpText`)}
-                        />
-                        <FieldError
-                          message={questionErrors?.helpText?.message}
-                        />
-                      </div>
-
-                      {questionType === "select" && (
-                        <div className="mt-3">
-                          <Label
-                            htmlFor={`question-${index}-options`}
-                            required
-                          >
-                            Dropdown Options
-                          </Label>
-                          <Textarea
-                            id={`question-${index}-options`}
-                            rows={3}
-                            invalid={!!questionErrors?.optionsText}
-                            placeholder={"Option one\nOption two\nOption three"}
-                            {...register(`questions.${index}.optionsText`)}
-                          />
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Enter one option per line.
-                          </p>
-                          <FieldError
-                            message={questionErrors?.optionsText?.message}
-                          />
-                        </div>
-                      )}
-
-                      <div className="mt-3 flex items-center gap-2">
-                        <Controller
-                          name={`questions.${index}.required`}
-                          control={control}
-                          render={({ field }) => (
-                            <Checkbox
-                              id={`question-${index}-required`}
-                              checked={field.value}
-                              onCheckedChange={field.onChange}
-                              aria-label={`Require question ${index + 1}`}
-                            />
-                          )}
-                        />
-                        <Label
-                          htmlFor={`question-${index}-required`}
-                          className="mb-0 cursor-pointer"
-                        >
-                          Required answer
-                        </Label>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            <FieldError message={errors.questions?.root?.message} />
-          </section>
-
-          <div>
-            <Label>Icon</Label>
-            <div className="grid grid-cols-5 gap-2">
-              {REQUEST_FORM_ICON_OPTIONS.map((option) => {
-                const Icon = REQUEST_FORM_ICONS[option.value];
-                return (
-                  <button
-                    key={option.value}
-                    type="button"
-                    title={option.label}
-                    aria-label={option.label}
-                    aria-pressed={selectedIcon === option.value}
-                    onClick={() =>
-                      setValue("icon", option.value, {
-                        shouldDirty: true,
-                        shouldValidate: true,
-                      })
-                    }
-                    className={cn(
-                      "flex h-10 items-center justify-center rounded-md border text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                      selectedIcon === option.value
-                        ? "border-primary bg-primary/5 text-primary"
-                        : "border-input"
-                    )}
-                  >
-                    <Icon className="h-4 w-4" />
-                  </button>
-                );
-              })}
-            </div>
-            <FieldError message={errors.icon?.message} />
-          </div>
-
-          <div>
-            <Label>Color</Label>
-            <div className="flex flex-wrap gap-2">
-              {REQUEST_FORM_ACCENT_OPTIONS.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  title={option.label}
-                  aria-label={option.label}
-                  aria-pressed={selectedAccent === option.value}
-                  onClick={() =>
-                    setValue("accent", option.value, {
-                      shouldDirty: true,
-                      shouldValidate: true,
-                    })
-                  }
-                  className={cn(
-                    "flex h-9 w-9 items-center justify-center rounded-md border border-input focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    selectedAccent === option.value &&
-                      "border-primary ring-2 ring-primary/20"
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "h-5 w-5 rounded-sm",
-                      REQUEST_FORM_ACCENTS[option.value]
-                    )}
-                  />
-                </button>
-              ))}
-            </div>
-            <FieldError message={errors.accent?.message} />
-          </div>
-
-          <div>
-            <Label htmlFor="request-form-status" required>
-              Catalog Status
-            </Label>
-            <Select
-              id="request-form-status"
-              invalid={!!errors.status}
-              {...register("status")}
-            >
-              {REQUEST_FORM_STATUS_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </Select>
-            <FieldError message={errors.status?.message} />
-          </div>
-        </form>
-      </Dialog>
-
-      <Dialog
-        open={!!pendingDelete}
-        onClose={() => setPendingDelete(null)}
-        title={`Delete ${pendingDelete?.title ?? "request form"}?`}
-        description="This removes the form from the catalog. Saved drafts for the form are not deleted."
-        footer={
-          <>
-            <Button variant="outline" onClick={() => setPendingDelete(null)}>
-              Cancel
-            </Button>
-            <Button variant="destructive" onClick={confirmDelete}>
-              Delete Form
-            </Button>
-          </>
-        }
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+    >
+      <div
+        className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+        onClick={onClose}
       />
-    </>
+
+      <div
+        className={cn(
+          "relative z-10 flex w-full max-w-lg flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl",
+          className
+        )}
+      >
+        {!hideClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close dialog"
+            className="absolute right-4 top-4 z-10 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        )}
+
+        <div
+          className={cn(
+            "shrink-0 px-5 pt-5 sm:px-6 sm:pt-6",
+            children || footer ? "pb-4" : "pb-5 sm:pb-6"
+          )}
+        >
+          <h2 className="pr-8 text-lg font-semibold text-foreground">
+            {title}
+          </h2>
+
+          {description && (
+            <p className="mt-1 text-sm text-muted-foreground">
+              {description}
+            </p>
+          )}
+        </div>
+
+        {children && (
+          <div
+            className={cn(
+              "min-h-0 overscroll-contain overflow-y-auto px-5 sm:px-6",
+              footer ? "pb-5" : "pb-5 sm:pb-6"
+            )}
+          >
+            {children}
+          </div>
+        )}
+
+        {footer && (
+          <div className="flex shrink-0 flex-col-reverse gap-2 border-t border-border bg-card px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
+            {footer}
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body
   );
 }
