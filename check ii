@@ -1,14 +1,43 @@
 import { NextResponse } from "next/server";
 import { getSessionUser, isAdminEmail } from "@/lib/session";
-import { simulateApprovalPolicy } from "@/lib/services/administration";
+import { deactivateRequestForm, listRequestFormCatalog, saveRequestForm } from "@/lib/services/admin-platform";
+import { parseRequestForms, type RequestFormDefinition } from "@/lib/service-categories";
 
 export const dynamic = "force-dynamic";
 
-export async function POST(request: Request) {
+export async function GET() {
+  if (!(await getSessionUser())) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  return NextResponse.json({ forms: await listRequestFormCatalog() });
+}
+
+async function requireAdmin() {
   const user = await getSessionUser();
-  if (!user || !(await isAdminEmail(user.email))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  let body: { requestType?: unknown; departmentCode?: unknown; priority?: unknown };
-  try { body = await request.json(); } catch { return NextResponse.json({ error: "Invalid body" }, { status: 400 }); }
-  if (typeof body.requestType !== "string") return NextResponse.json({ error: "requestType is required" }, { status: 400 });
-  return NextResponse.json(await simulateApprovalPolicy({ requestType: body.requestType, departmentCode: typeof body.departmentCode === "string" ? body.departmentCode : undefined, priority: typeof body.priority === "string" ? body.priority : undefined }));
+  return user && (await isAdminEmail(user.email)) ? user : null;
+}
+
+export async function POST(request: Request) {
+  const user = await requireAdmin();
+  if (!user) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const body = await request.json();
+  const parsed = parseRequestForms([body]);
+  if (!parsed?.[0]) return NextResponse.json({ error: "Invalid form definition" }, { status: 400 });
+  return NextResponse.json({ success: true, ...(await saveRequestForm(parsed[0], { id: user.id, email: user.email, name: user.displayName })) }, { status: 201 });
+}
+
+export async function PUT(request: Request) {
+  const user = await requireAdmin();
+  if (!user) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const body = await request.json() as RequestFormDefinition;
+  const parsed = parseRequestForms([body]);
+  if (!parsed?.[0]) return NextResponse.json({ error: "Invalid form definition" }, { status: 400 });
+  return NextResponse.json({ success: true, ...(await saveRequestForm(parsed[0], { id: user.id, email: user.email, name: user.displayName })) });
+}
+
+export async function DELETE(request: Request) {
+  const user = await requireAdmin();
+  if (!user) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const id = new URL(request.url).searchParams.get("id");
+  if (!id) return NextResponse.json({ error: "id is required" }, { status: 400 });
+  await deactivateRequestForm(id, { id: user.id, email: user.email, name: user.displayName });
+  return NextResponse.json({ success: true });
 }
