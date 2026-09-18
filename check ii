@@ -1,130 +1,280 @@
 "use client";
 
 import * as React from "react";
-import { Send, Loader2, MessageSquare } from "lucide-react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { Filter, Search, X, Inbox, Loader2 } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
+import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { MentionText, Textarea } from "@/components/ui/textarea";
+import { Card } from "@/components/ui/card";
+import { StatusBadge, PriorityBadge } from "@/components/ui/status-badges";
 import { UserAvatar } from "@/components/ui/user-avatar";
 import { EmptyState } from "@/components/ui/empty-state";
+import { REQUEST_STATUS_VALUES, type Priority } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
 
-interface Comment {
+interface RequestRow {
   id: string;
-  author_name: string;
-  comment: string;
+  reference: string;
+  request_type: string;
+  title: string;
+  status: string;
+  priority: string;
+  department: string;
+  requester_name: string;
+  assigned_to_name: string | null;
   created_at: string;
 }
 
-export function RequestComments({
-  reference,
-  initialComments,
-}: {
-  reference: string;
-  initialComments: Comment[];
-}) {
-  const [comments, setComments] =
-    React.useState<Comment[]>(initialComments);
-  const [draft, setDraft] = React.useState("");
-  const [posting, setPosting] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
+const TYPE_LABELS: Record<string, string> = {
+  general: "General Request",
+  "hr-onboarding": "HR Onboarding",
+  "hr-offboarding": "HR Offboarding",
+  "infosec-exception": "InfoSec Exception",
+};
 
-  const add = async () => {
-    const body = draft.trim();
-    if (!body) return;
+const PRIORITIES = ["Low", "Medium", "High", "Urgent"];
 
-    setPosting(true);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/requests/${encodeURIComponent(reference)}/comments`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ comment: body }),
-        }
-      );
+export default function RequestsPage() {
+  const router = useRouter();
+  const [rows, setRows] = React.useState<RequestRow[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [search, setSearch] = React.useState("");
+  const [status, setStatus] = React.useState("");
+  const [type, setType] = React.useState("");
+  const [priority, setPriority] = React.useState("");
 
-      const data = await res.json();
+  // Debounced fetch whenever a server-side filter changes.
+  React.useEffect(() => {
+    let active = true;
+    const timer = setTimeout(() => {
+      setLoading(true);
+      const params = new URLSearchParams({ limit: "100" });
+      if (search.trim()) params.set("q", search.trim());
+      if (status) params.set("status", status);
+      if (type) params.set("type", type);
+      if (priority) params.set("priority", priority);
+      fetch(`/api/requests?${params.toString()}`)
+        .then((res) => (res.ok ? res.json() : { items: [] }))
+        .then((data: { items: RequestRow[] }) => {
+          if (active) setRows(data.items ?? []);
+        })
+        .catch(() => {
+          if (active) setRows([]);
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+    }, 250);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [search, status, type, priority]);
 
-      if (res.ok && data.success) {
-        setComments((prev) => [...prev, data.comment]);
-        setDraft("");
-      } else {
-        setError(data.error ?? "Unable to add comment. Please try again.");
-      }
-    } catch {
-      setError("Unable to add comment. Check your connection and try again.");
-    } finally {
-      setPosting(false);
-    }
+  const filtered = rows;
+
+  const activeFilters =
+    [status, type, priority].filter(Boolean).length + (search ? 1 : 0);
+
+  const clearAll = () => {
+    setSearch("");
+    setStatus("");
+    setType("");
+    setPriority("");
   };
 
   return (
-    <div className="space-y-5">
-      {/* Input */}
-      <div className="rounded-lg border border-border bg-muted/20 p-3">
-        <div className="flex-1">
-          <Textarea
-            rows={3}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="Add a comment…"
-          />
-          <div className="mt-2 flex justify-end">
-            <Button
-              size="sm"
-              onClick={add}
-              disabled={posting || !draft.trim()}
-            >
-              {posting ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Send className="h-4 w-4" />
-              )}
-              Add Comment
-            </Button>
+    <main className="min-h-screen bg-background">
+      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
+        <div className="mb-6 flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:p-6">
+          <div className="flex items-center gap-4">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/15">
+              <Inbox className="h-6 w-6" />
+            </span>
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+                Requests
+              </h1>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Service requests across all departments.
+              </p>
+            </div>
           </div>
+          <Link href="/requests/general/new">
+            <Button>New Request</Button>
+          </Link>
         </div>
-      </div>
-      {error && (
-        <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-          {error}
-        </p>
-      )}
 
-      {/* Comments List */}
-      {comments.length === 0 ? (
-        <EmptyState
-          icon={MessageSquare}
-          title="No comments yet"
-          description="Start the discussion by adding the first comment."
-          className="py-8"
-        />
-      ) : (
-        <ul className="space-y-3">
-          {comments.map((c) => (
-            <li key={c.id} className="flex gap-3">
-              <UserAvatar name={c.author_name} size="md" />
+        {/* Filters */}
+        <Card className="mb-4 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <span className="flex items-center gap-2 text-sm font-medium text-foreground">
+              <Filter className="h-4 w-4" />
+              Filters
+              {activeFilters > 0 && (
+                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-semibold text-primary">
+                  {activeFilters}
+                </span>
+              )}
+            </span>
+            {activeFilters > 0 && (
+              <Button variant="ghost" size="sm" onClick={clearAll}>
+                <X className="h-4 w-4" />
+                Clear
+              </Button>
+            )}
+          </div>
 
-              <div className="flex-1 rounded-lg border border-border bg-muted/40 px-3 py-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-semibold text-foreground">
-                    {c.author_name}
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    {formatDateTime(new Date(c.created_at))}
-                  </span>
-                </div>
-
-                <MentionText
-                  text={c.comment}
-                  className="mt-1 block whitespace-pre-wrap text-sm text-foreground"
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="sm:col-span-2 lg:col-span-4">
+              <Label htmlFor="search">Search</Label>
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  id="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search by ID, title or requester…"
+                  className="pl-9"
                 />
               </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
+            </div>
+
+            <div>
+              <Label htmlFor="f-type">Request type</Label>
+              <Select
+                id="f-type"
+                value={type}
+                onChange={(e) => setType(e.target.value)}
+              >
+                <option value="">All types</option>
+                {Object.entries(TYPE_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </Select>
+            </div>
+
+            <div>
+              <Label htmlFor="f-priority">Priority</Label>
+              <Select
+                id="f-priority"
+                value={priority}
+                onChange={(e) => setPriority(e.target.value)}
+              >
+                <option value="">All priorities</option>
+                {PRIORITIES.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </Select>
+            </div>
+
+            <div className="lg:col-span-2">
+              <Label htmlFor="f-status">Status</Label>
+              <Select
+                id="f-status"
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+              >
+                <option value="">All statuses</option>
+                {REQUEST_STATUS_VALUES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          </div>
+        </Card>
+
+        <div className="mb-2 flex items-center justify-between gap-2 text-sm text-muted-foreground">
+          <p className="flex items-center gap-2">
+          {loading && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+          Showing {filtered.length} request{filtered.length === 1 ? "" : "s"}
+          </p>
+          {activeFilters > 0 && <span className="text-xs">Filters update automatically</span>}
+        </div>
+
+        <Card className="overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-border bg-muted/60 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  <th className="px-4 py-3.5">Request</th>
+                  <th className="px-4 py-3.5">Type</th>
+                  <th className="px-4 py-3.5">Department</th>
+                  <th className="px-4 py-3.5">Priority</th>
+                  <th className="px-4 py-3.5">Status</th>
+                  <th className="px-4 py-3.5">Requester</th>
+                  <th className="px-4 py-3.5">Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((r) => (
+                  <tr
+                    key={r.id}
+                    className="cursor-pointer border-b border-border last:border-0 transition-colors hover:bg-secondary/40"
+                    onClick={() => router.push(`/requests/${r.reference}`)}
+                  >
+                    <td className="px-4 py-3">
+                      <Link
+                        href={`/requests/${r.reference}`}
+                        className="font-medium text-foreground hover:text-primary hover:underline"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {r.title}
+                      </Link>
+                      <div className="font-mono text-xs text-primary">
+                        {r.reference}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {TYPE_LABELS[r.request_type] ?? r.request_type}
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {r.department || "—"}
+                    </td>
+                    <td className="px-4 py-3">
+                      <PriorityBadge priority={r.priority as Priority} />
+                    </td>
+                    <td className="px-4 py-3">
+                      <StatusBadge status={r.status as never} />
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="flex items-center gap-2">
+                        <UserAvatar name={r.requester_name} size="sm" />
+                        <span className="text-muted-foreground">
+                          {r.requester_name}
+                        </span>
+                      </span>
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
+                      {formatDateTime(new Date(r.created_at))}
+                    </td>
+                  </tr>
+                ))}
+                {!loading && filtered.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="p-0">
+                      <EmptyState
+                        icon={Inbox}
+                        title="No requests found"
+                        description="No requests match your filters yet. Submit a request to see it here."
+                      />
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      </div>
+    </main>
   );
 }
