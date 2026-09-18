@@ -2,100 +2,43 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Check, Loader2, Save } from "lucide-react";
+import { AlertTriangle, Check, Loader2, Send } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Select } from "@/components/ui/select";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { DirectoryPicker } from "@/components/general-request/DirectoryPickers";
-
-import {
-  WORKFLOW_STATUSES,
-  PRIORITY_VALUES,
-} from "@/lib/types";
-
-import type {
-  Person,
-  Approver,
-} from "@/lib/types";
+import { Select } from "@/components/ui/select";
 
 interface Props {
   reference: string;
-  initialStatus: string;
-  initialPriority: string;
-  initialAssignee: Person | null;
-  initialDepartment: string;
-  initialApprovers: Approver[];
+  currentStatus: string;
+  currentComment: string;
 }
 
-/**
- * Admin/Ops-only editor for request management.
- */
-export function RequestManagementPanel({
+export function ApproverDecisionPanel({
   reference,
-  initialStatus,
-  initialPriority,
-  initialAssignee,
-  initialDepartment,
-  initialApprovers,
+  currentStatus,
+  currentComment,
 }: Props) {
   const router = useRouter();
 
-  const [status, setStatus] = React.useState(initialStatus);
-  const [priority, setPriority] = React.useState(initialPriority);
-  const [assignee, setAssignee] =
-    React.useState<Person | null>(initialAssignee);
-
-  const [department, setDepartment] =
-    React.useState(initialDepartment);
-
-  const [approvers, setApprovers] =
-    React.useState<Approver[]>(initialApprovers);
-
-  const [selectedApprover, setSelectedApprover] =
-    React.useState<Person | null>(null);
+  const [status, setStatus] = React.useState(currentStatus);
+  const [comment, setComment] = React.useState(currentComment);
 
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
-  const statusOptions = React.useMemo(() => {
-    const list = [...WORKFLOW_STATUSES] as string[];
-
-    if (!list.includes(initialStatus)) {
-      list.unshift(initialStatus);
-    }
-
-    return list;
-  }, [initialStatus]);
-
-  const approverIds = React.useMemo(
-    () => approvers.map((a) => a.id).sort(),
-    [approvers]
-  );
-
-  const initialApproverIds = React.useMemo(
-    () => initialApprovers.map((a) => a.id).sort(),
-    [initialApprovers]
-  );
-
   const dirty =
-    status !== initialStatus ||
-    priority !== initialPriority ||
-    (assignee?.id ?? null) !==
-    (initialAssignee?.id ?? null) ||
-    department !== initialDepartment ||
-    JSON.stringify(approverIds) !==
-    JSON.stringify(initialApproverIds);
+    status !== currentStatus || comment !== currentComment;
 
   async function handleSave() {
     setSaving(true);
     setError(null);
     setSaved(false);
+
     try {
       const res = await fetch(
-        `/api/requests/${encodeURIComponent(reference)}`,
+        `/api/requests/${encodeURIComponent(reference)}/approvers`,
         {
           method: "PATCH",
           headers: {
@@ -103,20 +46,7 @@ export function RequestManagementPanel({
           },
           body: JSON.stringify({
             status,
-            priority,
-
-            assignedToId: assignee?.id ?? null,
-            assignedToName: assignee?.name ?? null,
-
-            assignedDepartment: department,
-
-            approvers: approvers.map((a) => ({
-              id: a.id,
-              name: a.name,
-              email: a.email,
-              status: a.status,
-              comment: a.comment,
-            })),
+            comment,
           }),
         }
       );
@@ -125,11 +55,11 @@ export function RequestManagementPanel({
         const data = (await res
           .json()
           .catch(() => ({}))) as {
-            error?: string;
-          };
+          error?: string;
+        };
 
         throw new Error(
-          data.error ?? "Failed to save changes"
+          data.error ?? "Failed to save decision"
         );
       }
 
@@ -139,7 +69,7 @@ export function RequestManagementPanel({
       setError(
         e instanceof Error
           ? e.message
-          : "Failed to save changes"
+          : "Failed to save decision"
       );
     } finally {
       setSaving(false);
@@ -148,184 +78,61 @@ export function RequestManagementPanel({
 
   return (
     <div className="space-y-5">
-      <div className="rounded-lg border border-primary/15 bg-primary/5 px-3 py-2.5 text-xs leading-5 text-muted-foreground">
-        Changes are applied together and recorded in the request activity timeline.
+      <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 text-xs leading-5 text-muted-foreground">
+        Your decision is recorded in the request history and may trigger notifications to the requester and support team.
       </div>
-
       <div className="space-y-1.5">
-        <Label htmlFor="mgmt-status">
-          Status
+        <Label htmlFor="approval-status">
+          Approval Status
         </Label>
 
         <Select
-          id="mgmt-status"
+          id="approval-status"
           value={status}
           onChange={(e) => {
             setStatus(e.target.value);
             setSaved(false);
           }}
         >
-          {statusOptions.map((s) => (
-            <option
-              key={s}
-              value={s}
-            >
-              {s}
-            </option>
-          ))}
+          <option value="Active">Active</option>
+
+          <option value="Approved">
+            Approved
+          </option>
+
+          <option value="On Hold">
+            On Hold
+          </option>
+
+          <option value="Cancelled">
+            Cancelled
+          </option>
         </Select>
       </div>
 
-      <div className="space-y-1.5">
-        <Label htmlFor="mgmt-priority">
-          Priority
-        </Label>
-
-        <Select
-          id="mgmt-priority"
-          value={priority}
-          onChange={(e) => {
-            setPriority(e.target.value);
-            setSaved(false);
-          }}
-        >
-          {PRIORITY_VALUES.map((p) => (
-            <option
-              key={p}
-              value={p}
-            >
-              {p}
-            </option>
-          ))}
-        </Select>
-      </div>
-
-      <div className="space-y-1.5">
-        <Label htmlFor="mgmt-assignee">
-          Assigned To
-        </Label>
-
-        <DirectoryPicker
-          id="mgmt-assignee"
-          value={assignee}
-          onChange={(person) => {
-            setAssignee(person);
-            setSaved(false);
-          }}
-          emptyLabel="Unassigned"
-        />
-      </div>
-
-      <div className="space-y-1.5">
-        <Label htmlFor="mgmt-department">
-          Assigned Department
-        </Label>
-
-        <Input
-          id="mgmt-department"
-          value={department}
-          onChange={(e) => {
-            setDepartment(e.target.value);
-            setSaved(false);
-          }}
-          placeholder="e.g. ENTERPRISE-OPS-HELPDESK"
-        />
-      </div>
-
-      <div className="space-y-3">
-        <div className="flex items-center justify-between gap-3">
-          <Label>Approvers</Label>
-          <span className="text-xs text-muted-foreground">
-            {approvers.length} configured
-          </span>
+      {status === "Cancelled" && (
+        <div className="flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2.5 text-xs leading-5 text-destructive">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          Cancelling this approval will stop your approval step. Add a comment explaining the decision.
         </div>
+      )}
 
-        <DirectoryPicker
-          value={selectedApprover}
-          onChange={setSelectedApprover}
-          emptyLabel="Select approver"
-        />
+      <div className="space-y-1.5">
+        <Label htmlFor="approval-comment">
+          Approval Comment
+        </Label>
 
-        <Button
-          type="button"
-          variant="outline"
-          disabled={!selectedApprover}
-          onClick={() => {
-            if (!selectedApprover) return;
-
-            const exists = approvers.some(
-              (a) =>
-                a.id === selectedApprover.id
-            );
-
-            if (exists) {
-              setSelectedApprover(null);
-              return;
-            }
-
-            setApprovers((current) => [
-              ...current,
-              {
-                id: selectedApprover.id,
-                name: selectedApprover.name,
-                email: selectedApprover.email,
-                department:
-                  selectedApprover.department,
-                status: "Active",
-                comment: "",
-              },
-            ]);
-
-            setSelectedApprover(null);
+        <textarea
+          id="approval-comment"
+          rows={4}
+          value={comment}
+          onChange={(e) => {
+            setComment(e.target.value);
             setSaved(false);
           }}
-        >
-          Add Approver
-        </Button>
-
-        {approvers.length > 0 && (
-          <div className="space-y-2">
-            {approvers.map((a) => (
-              <div
-                key={a.id}
-                className="flex items-center justify-between rounded-md border border-border p-3"
-              >
-                <div>
-                  <div className="font-medium">
-                    {a.name}
-                  </div>
-
-                  <div className="text-xs text-muted-foreground">
-                    {a.email}
-                  </div>
-
-                  {a.department && (
-                    <div className="text-xs text-muted-foreground">
-                      {a.department}
-                    </div>
-                  )}
-                </div>
-
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => {
-                    setApprovers((current) =>
-                      current.filter(
-                        (x) => x.id !== a.id
-                      )
-                    );
-
-                    setSaved(false);
-                  }}
-                >
-                  Remove
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
+          placeholder="Add approval comments..."
+          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+        />
       </div>
 
       {error && (
@@ -337,20 +144,21 @@ export function RequestManagementPanel({
       {saved && !dirty && (
         <p className="flex items-center gap-1.5 rounded-md bg-success/10 px-3 py-2 text-sm text-success">
           <Check className="h-4 w-4" />
-          Changes saved successfully.
+          Decision saved successfully.
         </p>
       )}
 
       <Button
         onClick={handleSave}
-        disabled={!dirty || saving}
+        disabled={saving || !dirty}
         className="w-full"
       >
         {saving && (
           <Loader2 className="h-4 w-4 animate-spin" />
         )}
-        {!saving && <Save className="h-4 w-4" />}
-        {saving ? "Saving changes…" : "Save Changes"}
+
+        {!saving && <Send className="h-4 w-4" />}
+        {saving ? "Saving decision…" : "Save Decision"}
       </Button>
     </div>
   );
