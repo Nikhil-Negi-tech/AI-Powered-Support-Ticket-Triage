@@ -4,10 +4,16 @@ import { listAdminAudit } from "@/lib/services/administration";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(request: Request) {
+function csv(value: unknown) {
+  const text = String(value ?? "");
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+export async function GET() {
   const user = await getSessionUser();
   if (!user || !(await isAdminEmail(user.email))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  const params = new URL(request.url).searchParams;
-  const limit = Number(params.get("limit") ?? "100");
-  return NextResponse.json({ items: await listAdminAudit(limit, { query: params.get("q") ?? undefined, resourceType: params.get("resourceType") ?? undefined }) });
+  const rows = await listAdminAudit(500);
+  const header = ["Actor", "Action", "Resource", "Resource ID", "Created"].join(",");
+  const body = rows.map((row) => [row.actor_email, row.action, row.resource_type, row.resource_id, row.created_at].map(csv).join(","));
+  return new NextResponse([header, ...body].join("\r\n"), { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="itsm-admin-audit-${new Date().toISOString().slice(0, 10)}.csv"` } });
 }
