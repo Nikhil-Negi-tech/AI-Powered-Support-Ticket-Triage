@@ -1,589 +1,186 @@
-/**
- * Centralized notification orchestrator.
- *
- * Every business event routes through one of the `notify*` functions here.
- * Each function fans out to the enabled channels (in-app bell + email today,
- * Teams/Slack in future), deduplicates recipients, and records a delivery
- * audit row. Notifications must NEVER break the core workflow, so every public
- * function swallows and logs its own errors.
- */
-import { q, q1 } from "@/lib/db/client";
-import { getUserById } from "@/lib/users-db";
-import type { ActorRef } from "./requests";
+"use client";
+
+import * as React from "react";
 import {
-  deduplicateRecipients,
-  excludeRecipient,
-  getRequestPath,
-  getRequestUrl,
-  type NotificationType,
-  type Recipient,
-} from "./notification-provider";
-import { getEmailProvider } from "./outlook-provider";
-import { createNotification, logDelivery } from "./in-app-notifications";
-import type { EmailContent } from "@/lib/templates/email/layout";
-import { buildRequestCreatedEmail } from "@/lib/templates/email/request-created";
-import { buildApprovalRequiredEmail } from "@/lib/templates/email/approval-required";
-import {
-  buildApprovalDecisionEmail,
-  type ApprovalDecision,
-} from "@/lib/templates/email/approval-decision";
-import { buildAssignmentEmail } from "@/lib/templates/email/assignment";
-import { buildStatusEmail } from "@/lib/templates/email/status";
-import { buildCommentEmail } from "@/lib/templates/email/comment";
-import { buildFollowerEmail } from "@/lib/templates/email/follower";
-import { buildMentionEmail } from "@/lib/templates/email/mention";
-import { isNotificationEnabled } from "@/lib/services/admin-platform";
+  cloneDefaultRequestForms,
+  parseRequestForms,
+  type RequestFormDefinition,
+  type RequestFormInput,
+} from "@/lib/service-categories";
 
-/* ------------------------------------------------------------------ */
-/* Request context loading                                             */
-/* ------------------------------------------------------------------ */
+const REQUEST_FORMS_STORAGE_KEY = "itsm.request-forms.v2";
+const REQUEST_FORMS_UPDATED_EVENT = "itsm:request-forms-updated";
 
-const TYPE_LABELS: Record<string, string> = {
-  general: "General Request",
-  "hr-onboarding": "HR Onboarding",
-  "hr-offboarding": "HR Offboarding",
-  "infosec-exception": "InfoSec Exception",
-};
-
-interface RequestContext {
-  id: string;
-  reference: string;
-  title: string;
-  status: string;
-  priority: string;
-  requestType: string;
-  requestTypeLabel: string;
-  requesterId: string | null;
-  requesterName: string;
-  requesterEmail: string;
-  requestedForId: string | null;
-  requestedForName: string | null;
-  requestedForEmail: string | null;
-  assignedToId: string | null;
-  assignedToName: string | null;
-  assignedDepartment: string;
-  followers: Recipient[];
-  approvers: Recipient[];
-}
-
-interface RequestRow {
-  id: string;
-  reference: string;
-  title: string;
-  status: string;
-  priority: string;
-  request_type: string;
-  requested_by: string | null;
-  requester_name: string;
-  requester_email: string;
-  requested_for: string | null;
-  requested_for_name: string | null;
-  requested_for_email: string | null;
-  assigned_to: string | null;
-  assigned_to_name: string | null;
-  assigned_department: string;
-}
-
-/** Load everything the orchestrator needs about a request (or null). */
-async function loadContext(requestId: string): Promise<RequestContext | null> {
-  const row = await q1<RequestRow>(
-    `SELECT id, reference, title, status, priority, request_type,
-            requested_by, requester_name, requester_email,
-            requested_for, requested_for_name, requested_for_email,
-            assigned_to, assigned_to_name, assigned_department
-       FROM service_requests WHERE id = $1`,
-    [requestId]
-  );
-  if (!row) return null;
-
-  const [followerRows, approverRows] = await Promise.all([
-    q<{ user_id: string; user_name: string; user_email: string }>(
-      `SELECT user_id, user_name, user_email FROM request_followers WHERE request_id = $1`,
-      [requestId]
-    ),
-    q<{ approver_id: string; approver_name: string; approver_email: string }>(
-      `SELECT approver_id, approver_name, approver_email FROM request_approvers WHERE request_id = $1`,
-      [requestId]
-    ),
-  ]);
-
-  return {
-    id: row.id,
-    reference: row.reference,
-    title: row.title,
-    status: row.status,
-    priority: row.priority,
-    requestType: row.request_type,
-    requestTypeLabel: TYPE_LABELS[row.request_type] ?? row.request_type,
-    requesterId: row.requested_by,
-    requesterName: row.requester_name,
-    requesterEmail: row.requester_email,
-    requestedForId: row.requested_for,
-    requestedForName: row.requested_for_name,
-    requestedForEmail: row.requested_for_email,
-    assignedToId: row.assigned_to,
-    assignedToName: row.assigned_to_name,
-    assignedDepartment: row.assigned_department,
-    followers: followerRows.map((f) => ({
-      id: f.user_id,
-      name: f.user_name,
-      email: f.user_email,
-    })),
-    approvers: approverRows.map((a) => ({
-      id: a.approver_id,
-      name: a.approver_name,
-      email: a.approver_email,
-    })),
-  };
-}
-
-/* ------------------------------------------------------------------ */
-/* Recipient helpers                                                   */
-/* ------------------------------------------------------------------ */
-
-function requesterRecipient(ctx: RequestContext): Recipient | null {
-  if (!ctx.requesterEmail) return null;
-  return { id: ctx.requesterId, name: ctx.requesterName, email: ctx.requesterEmail };
-}
-
-function requestedForRecipient(ctx: RequestContext): Recipient | null {
-  if (!ctx.requestedForEmail) return null;
-  return {
-    id: ctx.requestedForId,
-    name: ctx.requestedForName ?? "",
-    email: ctx.requestedForEmail,
-  };
-}
-
-/** Assignee email isn't stored on the request row, so resolve it lazily. */
-async function assigneeRecipient(ctx: RequestContext): Promise<Recipient | null> {
-
-  if (!ctx.assignedToId) {
-    return null;
-  }
-
-  const user = await getUserById(ctx.assignedToId);
-
-
-  if (!user?.email) {
-    return null;
-  }
-
-  return {
-    id: user.id,
-    name: user.displayName,
-    email: user.email,
-  };
-}
-
-function compact(list: (Recipient | null | undefined)[]): Recipient[] {
-  return list.filter((r): r is Recipient => Boolean(r && r.email));
-}
-
-/* ------------------------------------------------------------------ */
-/* Core dispatch                                                       */
-/* ------------------------------------------------------------------ */
-
-interface DispatchParams {
-  ctx: RequestContext;
-  type: NotificationType;
-  recipients: Recipient[];
-  inApp: (recipient: Recipient) => { title: string; message: string };
-  email: (recipient: Recipient) => EmailContent;
-}
-
-/**
- * Deliver one notification event to every (deduplicated) recipient across all
- * channels. Per-recipient failures are isolated and audited; they never abort
- * the batch or bubble up to the caller.
- */
-async function dispatch(params: DispatchParams): Promise<void> {
-  if (!(await isNotificationEnabled(params.type))) return;
-  const recipients = deduplicateRecipients(params.recipients);
-  const provider = getEmailProvider();
-
-  await Promise.all(
-    recipients.map(async (recipient) => {
-      const { title, message } = params.inApp(recipient);
-      const link = getRequestPath(params.ctx.reference);
-
-      // 1) In-app bell notification (requires a directory id).
-      if (recipient.id) {
-        try {
-          await createNotification({
-            userId: recipient.id,
-            userEmail: recipient.email,
-            type: params.type,
-            title,
-            message,
-            requestId: params.ctx.id,
-            requestReference: params.ctx.reference,
-            link,
-          });
-        } catch (error) {
-          console.error("[notifications] in-app create failed", error);
-        }
-      }
-
-      // 2) Email notification (audited in notification_log).
-      const email = params.email(recipient);
-      try {
-        const result = await provider.sendMail({
-          to: recipient.email,
-          subject: email.subject,
-          html: email.html,
-        });
-        await logDelivery({
-          requestId: params.ctx.id,
-          requestReference: params.ctx.reference,
-          channel: "email",
-          recipientEmail: recipient.email,
-          type: params.type,
-          subject: email.subject,
-          status: result.success ? "sent" : "failed",
-          errorMessage: result.error ?? null,
-        });
-      } catch (error) {
-        try {
-          await logDelivery({
-            requestId: params.ctx.id,
-            requestReference: params.ctx.reference,
-            channel: "email",
-            recipientEmail: recipient.email,
-            type: params.type,
-            subject: email.subject,
-            status: "failed",
-            errorMessage: error instanceof Error ? error.message : "send error",
-          });
-        } catch {
-          /* audit best-effort */
-        }
-      }
-
-      // 3) TODO(teams/slack/push): fan out to additional providers here.
-    })
-  );
-}
-
-/** Wrap an orchestration body so notifications never break the workflow. */
-async function safely(label: string, fn: () => Promise<void>): Promise<void> {
+function loadRequestForms(): RequestFormDefinition[] {
   try {
-    await fn();
-  } catch (error) {
-    console.error(`[notifications] ${label} failed`, error);
+    const raw = window.localStorage.getItem(REQUEST_FORMS_STORAGE_KEY);
+
+    if (!raw) return cloneDefaultRequestForms();
+
+    return (
+      parseRequestForms(JSON.parse(raw)) ??
+      cloneDefaultRequestForms()
+    );
+  } catch {
+    return cloneDefaultRequestForms();
   }
 }
 
-/* ------------------------------------------------------------------ */
-/* Public events                                                       */
-/* ------------------------------------------------------------------ */
-
-/** Request Created — notify requester, requested-for, assignee and approvers. */
-export async function notifyRequestCreated(
-  requestId: string,
-  actor: ActorRef
-): Promise<void> {
-  return safely("requestCreated", async () => {
-    const ctx = await loadContext(requestId);
-    if (!ctx) return;
-    const url = getRequestUrl(ctx.reference);
-    const recipients = compact([
-      requesterRecipient(ctx),
-      requestedForRecipient(ctx),
-      await assigneeRecipient(ctx),
-      ...ctx.approvers,
-    ]);
-
-    await dispatch({
-      ctx,
-      type: "request_created",
-      recipients,
-      inApp: () => ({
-        title: "Request Submitted",
-        message: `${ctx.reference} — ${ctx.title} has been submitted.`,
-      }),
-      email: (r) =>
-        buildRequestCreatedEmail({
-          recipientName: r.name,
-          reference: ctx.reference,
-          title: ctx.title,
-          status: ctx.status,
-          priority: ctx.priority,
-          requestType: ctx.requestTypeLabel,
-          requesterName: actor.name || ctx.requesterName,
-          url,
-        }),
-    });
-  });
-}
-
-/** Approval Required — notify a single (newly added) approver. */
-export async function notifyApprovalRequired(
-  requestId: string,
-  approver: Recipient,
-  actor: ActorRef
-): Promise<void> {
-  return safely("approvalRequired", async () => {
-    const ctx = await loadContext(requestId);
-    if (!ctx || !approver.email) return;
-    const url = getRequestUrl(ctx.reference);
-
-    await dispatch({
-      ctx,
-      type: "approval_required",
-      recipients: [approver],
-      inApp: () => ({
-        title: "Approval Required",
-        message: `${ctx.reference} requires your approval.`,
-      }),
-      email: (r) =>
-        buildApprovalRequiredEmail({
-          approverName: r.name,
-          reference: ctx.reference,
-          title: ctx.title,
-          requesterName: actor.name || ctx.requesterName,
-          url,
-        }),
-    });
-  });
-}
-
-/** Approval Decision — notify requester, assignee and followers. */
-export async function notifyApprovalDecision(
-  requestId: string,
-  decision: ApprovalDecision,
-  approver: ActorRef,
-  comment?: string
-): Promise<void> {
-  return safely("approvalDecision", async () => {
-    const ctx = await loadContext(requestId);
-    if (!ctx) return;
-    const url = getRequestUrl(ctx.reference);
-    const recipients = compact([
-      requesterRecipient(ctx),
-      await assigneeRecipient(ctx),
-      ...ctx.followers,
-    ]);
-
-    await dispatch({
-      ctx,
-      type: "approval_decision",
-      recipients,
-      inApp: () => ({
-        title: decision === "Approved" ? "Request Approved" : "Request Rejected",
-        message: `${ctx.reference} was ${decision.toLowerCase()} by ${approver.name}.`,
-      }),
-      email: (r) =>
-        buildApprovalDecisionEmail({
-          recipientName: r.name,
-          reference: ctx.reference,
-          title: ctx.title,
-          decision,
-          approverName: approver.name,
-          comment,
-          url,
-        }),
-    });
-  });
-}
-
-/** Assignment Changed — notify the new assignee and the requester. */
-export async function notifyAssignmentChanged(
-  requestId: string,
-  actor: ActorRef
-): Promise<void> {
-  return safely("assignmentChanged", async () => {
-    const ctx = await loadContext(requestId);
-    if (!ctx) return;
-    const url = getRequestUrl(ctx.reference);
-    const recipients = compact([
-      await assigneeRecipient(ctx),
-      requesterRecipient(ctx),
-    ]);
-    await dispatch({
-      ctx,
-      type: "assignment_changed",
-      recipients,
-      inApp: () => ({
-        title: "Request Assigned",
-        message: `${ctx.reference} assigned${ctx.assignedToName ? ` to ${ctx.assignedToName}` : ""}.`,
-      }),
-      email: (r) =>
-        buildAssignmentEmail({
-          recipientName: r.name,
-          reference: ctx.reference,
-          title: ctx.title,
-          assigneeName: ctx.assignedToName ?? "",
-          assignedDepartment: ctx.assignedDepartment,
-          url,
-        }),
-    });
-  });
-}
-
-/** Status Changed — notify requester, requested-for and followers. */
-export async function notifyStatusChanged(
-  requestId: string,
-  oldStatus: string,
-  newStatus: string,
-  actor: ActorRef
-): Promise<void> {
-  return safely("statusChanged", async () => {
-    const ctx = await loadContext(requestId);
-    if (!ctx) return;
-    const url = getRequestUrl(ctx.reference);
-    const recipients = compact([
-      requesterRecipient(ctx),
-      requestedForRecipient(ctx),
-      ...ctx.followers,
-    ]);
-
-    await dispatch({
-      ctx,
-      type: "status_changed",
-      recipients,
-      inApp: () => ({
-        title: "Status Updated",
-        message: `${ctx.reference} moved to ${newStatus}.`,
-      }),
-      email: (r) =>
-        buildStatusEmail({
-          recipientName: r.name,
-          reference: ctx.reference,
-          title: ctx.title,
-          oldStatus,
-          newStatus,
-          actorName: actor.name,
-          url,
-        }),
-    });
-  });
-}
-
-/** Comment Added — notify requester, assignee and followers (never the author). */
-export async function notifyCommentAdded(
-  requestId: string,
-  author: ActorRef,
-  comment: string
-): Promise<void> {
-  return safely("commentAdded", async () => {
-    const ctx = await loadContext(requestId);
-    if (!ctx) return;
-    const url = getRequestUrl(ctx.reference);
-    const recipients = excludeRecipient(
-      compact([
-        requesterRecipient(ctx),
-        await assigneeRecipient(ctx),
-        ...ctx.followers,
-      ]),
-      author.email
+function persistRequestForms(forms: RequestFormDefinition[]) {
+  try {
+    window.localStorage.setItem(
+      REQUEST_FORMS_STORAGE_KEY,
+      JSON.stringify(forms)
     );
 
-    await dispatch({
-      ctx,
-      type: "comment_added",
-      recipients,
-      inApp: () => ({
-        title: "New Comment",
-        message: `${author.name} commented on ${ctx.reference}.`,
-      }),
-      email: (r) =>
-        buildCommentEmail({
-          recipientName: r.name,
-          reference: ctx.reference,
-          title: ctx.title,
-          authorName: author.name,
-          comment,
-          url,
-        }),
-    });
-  });
+    window.dispatchEvent(new Event(REQUEST_FORMS_UPDATED_EVENT));
+  } catch {
+    // Keep in-memory changes available when browser storage is blocked.
+  }
 }
 
-/** Follower Added — notify a single newly added follower. */
-export async function notifyFollowerAdded(
-  requestId: string,
-  follower: Recipient,
-  actor: ActorRef
-): Promise<void> {
-  return safely("followerAdded", async () => {
-    const ctx = await loadContext(requestId);
-    if (!ctx || !follower.email) return;
-    const url = getRequestUrl(ctx.reference);
+function createUniqueFormId(
+  title: string,
+  forms: RequestFormDefinition[]
+): string {
+  const base =
+    title
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "request";
 
-    await dispatch({
-      ctx,
-      type: "follower_added",
-      recipients: [follower],
-      inApp: () => ({
-        title: "Added As Follower",
-        message: `You were added as a follower on ${ctx.reference}.`,
-      }),
-      email: (r) =>
-        buildFollowerEmail({
-          followerName: r.name,
-          reference: ctx.reference,
-          title: ctx.title,
-          addedByName: actor.name,
-          url,
-        }),
-    });
-  });
+  const existingIds = new Set(forms.map((form) => form.id));
+
+  if (!existingIds.has(base)) return base;
+
+  let suffix = 2;
+
+  while (existingIds.has(`${base}-${suffix}`)) {
+    suffix += 1;
+  }
+
+  return `${base}-${suffix}`;
 }
 
-/**
- * Mention — notify each mentioned user once (self-mentions excluded).
- * Also appends a "Mention Added" activity entry per mentioned user.
- * `mentions` is verified by the caller to actually appear in the comment text.
- */
-export async function notifyMentions(
-  requestId: string,
-  author: ActorRef,
-  comment: string,
-  mentions: Recipient[]
-): Promise<void> {
-  return safely("mentions", async () => {
-    const ctx = await loadContext(requestId);
-    if (!ctx) return;
-    const url = getRequestUrl(ctx.reference);
+export function useRequestFormCatalog() {
+  const [forms, setForms] = React.useState<RequestFormDefinition[]>([]);
+  const [isLoaded, setIsLoaded] = React.useState(false);
+  const formsRef = React.useRef(forms);
 
-    const recipients = excludeRecipient(
-      deduplicateRecipients(mentions),
-      author.email
-    );
-    if (recipients.length === 0) return;
+  const syncFromStorage = React.useCallback(() => {
+    const nextForms = loadRequestForms();
 
-    // Activity trail: one "Mention Added" entry per mentioned user.
-    for (const r of recipients) {
-      try {
-        await q(
-          `INSERT INTO request_activity
-             (request_id, activity_type, description, performed_by, performed_by_name)
-           VALUES ($1, 'Mention Added', $2, $3, $4)`,
-          [requestId, `mentioned ${r.name} in a comment.`, author.id, author.name]
-        );
-      } catch (error) {
-        console.error("[notifications] mention activity failed", error);
+    formsRef.current = nextForms;
+    setForms(nextForms);
+    setIsLoaded(true);
+  }, []);
+
+  React.useEffect(() => {
+    syncFromStorage();
+
+    fetch("/api/request-forms")
+      .then(async (response) => {
+        if (!response.ok) return null;
+        const body = await response.json();
+        return parseRequestForms(body.forms);
+      })
+      .then((remoteForms) => {
+        if (!remoteForms) return;
+        formsRef.current = remoteForms;
+        setForms(remoteForms);
+        setIsLoaded(true);
+      })
+      .catch(() => {
+        // Keep the local catalog as a temporary offline fallback.
+      });
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === REQUEST_FORMS_STORAGE_KEY) {
+        syncFromStorage();
       }
-    }
+    };
 
-    await dispatch({
-      ctx,
-      type: "mention",
-      recipients,
-      inApp: () => ({
-        title: "You Were Mentioned",
-        message: `${author.name} mentioned you in ${ctx.reference}.`,
-      }),
-      email: (r) =>
-        buildMentionEmail({
-          mentionedName: r.name,
-          reference: ctx.reference,
-          title: ctx.title,
-          mentionedByName: author.name,
-          comment,
-          url,
-        }),
-    });
-  });
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener(
+      REQUEST_FORMS_UPDATED_EVENT,
+      syncFromStorage
+    );
+
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener(
+        REQUEST_FORMS_UPDATED_EVENT,
+        syncFromStorage
+      );
+    };
+  }, [syncFromStorage]);
+
+  const commit = React.useCallback(
+    (nextForms: RequestFormDefinition[]) => {
+      formsRef.current = nextForms;
+      setForms(nextForms);
+      persistRequestForms(nextForms);
+    },
+    []
+  );
+
+  const addForm = React.useCallback(
+    (input: RequestFormInput) => {
+      const currentForms = formsRef.current;
+
+      const form: RequestFormDefinition = {
+        ...input,
+        id: createUniqueFormId(input.title, currentForms),
+        template: "general",
+      };
+
+      commit([...currentForms, form]);
+      void fetch("/api/request-forms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form),
+      });
+
+      return form;
+    },
+    [commit]
+  );
+
+  const updateForm = React.useCallback(
+    (id: string, input: RequestFormInput) => {
+      commit(
+        formsRef.current.map((form) =>
+          form.id === id ? { ...form, ...input } : form
+        )
+      );
+      const next = formsRef.current.find((form) => form.id === id);
+      if (next) {
+        void fetch("/api/request-forms", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...next, ...input }),
+        });
+      }
+    },
+    [commit]
+  );
+
+  const deleteForm = React.useCallback(
+    (id: string) => {
+      commit(formsRef.current.filter((form) => form.id !== id));
+      void fetch(`/api/request-forms?id=${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+    },
+    [commit]
+  );
+
+  return {
+    forms,
+    isLoaded,
+    addForm,
+    updateForm,
+    deleteForm,
+  };
 }
