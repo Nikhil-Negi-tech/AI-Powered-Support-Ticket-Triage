@@ -1,116 +1,194 @@
 "use client";
 
 import * as React from "react";
-import { createPortal } from "react-dom";
-import { X } from "lucide-react";
-import { cn } from "@/lib/utils";
+import {
+  cloneDefaultRequestForms,
+  parseRequestForms,
+  type RequestFormDefinition,
+  type RequestFormInput,
+} from "@/lib/service-categories";
 
-export interface DialogProps {
-  open: boolean;
-  onClose: () => void;
-  title: string;
-  description?: string;
-  children?: React.ReactNode;
-  footer?: React.ReactNode;
-  className?: string;
-  hideClose?: boolean;
+const REQUEST_FORMS_STORAGE_KEY = "itsm.request-forms.v2";
+const REQUEST_FORMS_UPDATED_EVENT = "itsm:request-forms-updated";
+
+function loadRequestForms(): RequestFormDefinition[] {
+  try {
+    const raw = window.localStorage.getItem(REQUEST_FORMS_STORAGE_KEY);
+
+    if (!raw) return cloneDefaultRequestForms();
+
+    return (
+      parseRequestForms(JSON.parse(raw)) ??
+      cloneDefaultRequestForms()
+    );
+  } catch {
+    return cloneDefaultRequestForms();
+  }
 }
 
-/** Lightweight accessible modal dialog (dependency-free). */
-export function Dialog({
-  open,
-  onClose,
-  title,
-  description,
-  children,
-  footer,
-  className,
-  hideClose,
-}: DialogProps) {
-  React.useEffect(() => {
-    if (!open) return;
+function persistRequestForms(forms: RequestFormDefinition[]) {
+  try {
+    window.localStorage.setItem(
+      REQUEST_FORMS_STORAGE_KEY,
+      JSON.stringify(forms)
+    );
 
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
+    window.dispatchEvent(new Event(REQUEST_FORMS_UPDATED_EVENT));
+  } catch {
+    // Keep in-memory changes available when browser storage is blocked.
+  }
+}
 
-    document.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
+function createUniqueFormId(
+  title: string,
+  forms: RequestFormDefinition[]
+): string {
+  const base =
+    title
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "request";
 
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = "";
-    };
-  }, [open, onClose]);
+  const existingIds = new Set(forms.map((form) => form.id));
 
-  if (!open || typeof document === "undefined") {
-    return null;
+  if (!existingIds.has(base)) return base;
+
+  let suffix = 2;
+
+  while (existingIds.has(`${base}-${suffix}`)) {
+    suffix += 1;
   }
 
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[9999] flex items-center justify-center p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
-    >
-      <div
-        className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
-        onClick={onClose}
-      />
+  return `${base}-${suffix}`;
+}
 
-      <div
-        className={cn(
-          "relative z-10 flex w-full max-w-lg flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl",
-          className
-        )}
-      >
-        {!hideClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close dialog"
-            className="absolute right-4 top-4 z-10 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        )}
+export function useRequestFormCatalog() {
+  const [forms, setForms] = React.useState<RequestFormDefinition[]>([]);
+  const [isLoaded, setIsLoaded] = React.useState(false);
+  const formsRef = React.useRef(forms);
 
-        <div
-          className={cn(
-            "shrink-0 px-5 pt-5 sm:px-6 sm:pt-6",
-            children || footer ? "pb-4" : "pb-5 sm:pb-6"
-          )}
-        >
-          <h2 className="pr-8 text-lg font-semibold text-foreground">
-            {title}
-          </h2>
+  const syncFromStorage = React.useCallback(() => {
+    const nextForms = loadRequestForms();
 
-          {description && (
-            <p className="mt-1 text-sm text-muted-foreground">
-              {description}
-            </p>
-          )}
-        </div>
+    formsRef.current = nextForms;
+    setForms(nextForms);
+    setIsLoaded(true);
+  }, []);
 
-        {children && (
-          <div
-            className={cn(
-              "min-h-0 overscroll-contain overflow-y-auto px-5 sm:px-6",
-              footer ? "pb-5" : "pb-5 sm:pb-6"
-            )}
-          >
-            {children}
-          </div>
-        )}
+  React.useEffect(() => {
+    syncFromStorage();
 
-        {footer && (
-          <div className="flex shrink-0 flex-col-reverse gap-2 border-t border-border bg-card px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
-            {footer}
-          </div>
-        )}
-      </div>
-    </div>,
-    document.body
+    fetch("/api/request-forms")
+      .then(async (response) => {
+        if (!response.ok) return null;
+        const body = await response.json();
+        return parseRequestForms(body.forms);
+      })
+      .then((remoteForms) => {
+        if (!remoteForms) return;
+        const localForms = loadRequestForms();
+        const localById = new Map(localForms.map((form) => [form.id, form]));
+        const mergedForms = remoteForms.map((form) => {
+          const local = localById.get(form.id);
+          return local && form.questions.length === 0 && local.questions.length > 0
+            ? { ...form, questions: local.questions }
+            : form;
+        });
+        formsRef.current = mergedForms;
+        setForms(mergedForms);
+        setIsLoaded(true);
+      })
+      .catch(() => {
+        // Keep the local catalog as a temporary offline fallback.
+      });
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === REQUEST_FORMS_STORAGE_KEY) {
+        syncFromStorage();
+      }
+    };
+
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener(
+      REQUEST_FORMS_UPDATED_EVENT,
+      syncFromStorage
+    );
+
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener(
+        REQUEST_FORMS_UPDATED_EVENT,
+        syncFromStorage
+      );
+    };
+  }, [syncFromStorage]);
+
+  const commit = React.useCallback(
+    (nextForms: RequestFormDefinition[]) => {
+      formsRef.current = nextForms;
+      setForms(nextForms);
+      persistRequestForms(nextForms);
+    },
+    []
   );
+
+  const addForm = React.useCallback(
+    (input: RequestFormInput) => {
+      const currentForms = formsRef.current;
+
+      const form: RequestFormDefinition = {
+        ...input,
+        id: createUniqueFormId(input.title, currentForms),
+        template: "general",
+      };
+
+      commit([...currentForms, form]);
+      void fetch("/api/request-forms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form),
+      });
+
+      return form;
+    },
+    [commit]
+  );
+
+  const updateForm = React.useCallback(
+    (id: string, input: RequestFormInput) => {
+      commit(
+        formsRef.current.map((form) =>
+          form.id === id ? { ...form, ...input } : form
+        )
+      );
+      const next = formsRef.current.find((form) => form.id === id);
+      if (next) {
+        void fetch("/api/request-forms", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...next, ...input }),
+        });
+      }
+    },
+    [commit]
+  );
+
+  const deleteForm = React.useCallback(
+    (id: string) => {
+      commit(formsRef.current.filter((form) => form.id !== id));
+      void fetch(`/api/request-forms?id=${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+    },
+    [commit]
+  );
+
+  return {
+    forms,
+    isLoaded,
+    addForm,
+    updateForm,
+    deleteForm,
+  };
 }
