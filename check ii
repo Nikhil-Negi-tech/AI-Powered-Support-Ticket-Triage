@@ -1,21 +1,54 @@
-"use client";
+import { NextResponse } from "next/server";
+import { getSessionUser, isAdminEmail } from "@/lib/session";
+import { createAdminCategory, createAdminDepartment, createApprovalPolicy, getAdminCounts, listAdminConfiguration, updateConfigurationState } from "@/lib/services/administration";
 
-import * as React from "react";
-import { Search, UserRoundCheck } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
+export const dynamic = "force-dynamic";
 
-interface ManagedUser { id: string; display_name: string; email: string; department: string; job_title: string; account_status: string; roles: Array<{ role: string }>; }
+async function requireAdmin() {
+  const user = await getSessionUser();
+  return user && (await isAdminEmail(user.email)) ? user : null;
+}
 
-export function UserManagementPanel() {
-  const [query, setQuery] = React.useState("");
-  const [users, setUsers] = React.useState<ManagedUser[]>([]);
-  const [message, setMessage] = React.useState("");
-  const load = React.useCallback(() => { fetch(`/api/admin/users?q=${encodeURIComponent(query)}`).then((response) => response.json()).then((body) => setUsers(body.users ?? [])); }, [query]);
-  React.useEffect(() => { load(); }, [load]);
-  const update = async (userId: string, field: string, value: string) => { const response = await fetch("/api/admin/users", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ userId, [field]: value }) }); const body = await response.json(); setMessage(response.ok ? "User access updated." : body.error ?? "Unable to update user"); if (response.ok) load(); };
-  return <Card className="mb-6"><CardHeader><CardTitle className="flex items-center gap-2"><UserRoundCheck className="h-4 w-4 text-primary" />User access management</CardTitle></CardHeader><CardContent><div className="relative mb-4"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><Input value={query} onChange={(event) => setQuery(event.target.value)} className="pl-9" placeholder="Search name, email or department" /></div><div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead className="border-b border-border text-xs uppercase text-muted-foreground"><tr><th className="px-3 py-2">User</th><th className="px-3 py-2">Department</th><th className="px-3 py-2">Role</th><th className="px-3 py-2">Status</th></tr></thead><tbody className="divide-y divide-border">{users.map((user) => <tr key={user.id}><td className="px-3 py-3"><p className="font-medium">{user.display_name}</p><p className="text-xs text-muted-foreground">{user.email} · {user.job_title || "No title"}</p></td><td className="px-3 py-3"><Input defaultValue={user.department} onBlur={(event) => { if (event.target.value !== user.department) update(user.id, "department", event.target.value); }} /></td><td className="px-3 py-3"><Select value={user.roles[0]?.role ?? "User"} onChange={(event) => update(user.id, "role", event.target.value)}><option>User</option><option>Approver</option><option>Manager</option><option>Admin</option><option>Super Admin</option></Select></td><td className="px-3 py-3"><Button variant="ghost" size="sm" onClick={() => update(user.id, "status", user.account_status === "active" ? "inactive" : "active")}><Badge variant={user.account_status === "active" ? "success" : "neutral"}>{user.account_status === "active" ? "Active" : "Inactive"}</Badge></Button></td></tr>)}</tbody></table></div>{!users.length && <p className="py-8 text-center text-sm text-muted-foreground">No synchronized users found.</p>}{message && <p className="mt-3 text-sm text-muted-foreground">{message}</p>}</CardContent></Card>;
+export async function GET() {
+  if (!(await requireAdmin())) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  return NextResponse.json({ ...(await listAdminConfiguration()), counts: await getAdminCounts() });
+}
+
+export async function POST(request: Request) {
+  const user = await requireAdmin();
+  if (!user) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  let body: Record<string, unknown>;
+  try { body = await request.json(); } catch { return NextResponse.json({ error: "Invalid body" }, { status: 400 }); }
+  const actor = { id: user.id, email: user.email, name: user.displayName };
+  try {
+    if (body.type === "department") {
+      if (typeof body.name !== "string" || typeof body.code !== "string") throw new Error("Department name and code are required");
+      return NextResponse.json({ success: true, id: await createAdminDepartment({ name: body.name, code: body.code, description: typeof body.description === "string" ? body.description : "" }, actor) }, { status: 201 });
+    }
+    if (body.type === "category") {
+      if (typeof body.name !== "string" || typeof body.slug !== "string") throw new Error("Category name and slug are required");
+      return NextResponse.json({ success: true, id: await createAdminCategory({ name: body.name, slug: body.slug, parentId: typeof body.parentId === "string" ? body.parentId : null, description: typeof body.description === "string" ? body.description : "" }, actor) }, { status: 201 });
+    }
+    if (body.type === "approval-policy") {
+      if (typeof body.name !== "string" || !Array.isArray(body.steps) || body.steps.length === 0) throw new Error("Policy name and at least one step are required");
+      return NextResponse.json({ success: true, id: await createApprovalPolicy({ name: body.name, requestType: typeof body.requestType === "string" ? body.requestType : "*", departmentCode: typeof body.departmentCode === "string" ? body.departmentCode : undefined, priority: typeof body.priority === "string" ? body.priority : undefined, steps: body.steps as never }, actor) }, { status: 201 });
+    }
+    return NextResponse.json({ error: "Unknown configuration type" }, { status: 400 });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to save configuration" }, { status: 400 });
+  }
+}
+
+export async function PATCH(request: Request) {
+  const user = await requireAdmin();
+  if (!user) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  let body: Record<string, unknown>;
+  try { body = await request.json(); } catch { return NextResponse.json({ error: "Invalid body" }, { status: 400 }); }
+  if (!['department', 'category', 'approval_policy'].includes(String(body.resourceType)) || typeof body.id !== 'string' || typeof body.active !== 'boolean') return NextResponse.json({ error: "resourceType, id and active are required" }, { status: 400 });
+  try {
+    await updateConfigurationState(body.resourceType as "department" | "category" | "approval_policy", body.id, body.active, { id: user.id, email: user.email, name: user.displayName });
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to update configuration" }, { status: 400 });
+  }
 }
