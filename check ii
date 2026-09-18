@@ -1,19 +1,33 @@
 import { NextResponse } from "next/server";
 import { getSessionUser, isAdminEmail } from "@/lib/session";
-import { listAdminAudit } from "@/lib/services/administration";
+import { createPlatformMetadata, listPlatformMetadata, type MetadataResource } from "@/lib/services/admin-platform";
 
 export const dynamic = "force-dynamic";
+const RESOURCES: MetadataResource[] = ["form", "workflow", "notification", "report", "setting", "feature"];
 
-function csv(value: unknown) {
-  const text = String(value ?? "");
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+async function admin() {
+  const user = await getSessionUser();
+  return user && (await isAdminEmail(user.email)) ? user : null;
 }
 
 export async function GET() {
-  const user = await getSessionUser();
-  if (!user || !(await isAdminEmail(user.email))) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  const rows = await listAdminAudit(500);
-  const header = ["Actor", "Action", "Resource", "Resource ID", "Created"].join(",");
-  const body = rows.map((row) => [row.actor_email, row.action, row.resource_type, row.resource_id, row.created_at].map(csv).join(","));
-  return new NextResponse([header, ...body].join("\r\n"), { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="itsm-admin-audit-${new Date().toISOString().slice(0, 10)}.csv"` } });
+  if (!(await admin())) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  return NextResponse.json(await listPlatformMetadata());
+}
+
+export async function POST(request: Request) {
+  const user = await admin();
+  if (!user) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  let body: Record<string, unknown>;
+  try { body = await request.json(); } catch { return NextResponse.json({ error: "Invalid body" }, { status: 400 }); }
+  const resource = body.resource;
+  if (typeof resource !== "string" || !RESOURCES.includes(resource as MetadataResource)) return NextResponse.json({ error: "Invalid metadata resource" }, { status: 400 });
+  if (typeof body.key !== "string" || !body.key.trim()) return NextResponse.json({ error: "A unique key is required" }, { status: 400 });
+  if (["form", "workflow", "notification", "report"].includes(resource) && (typeof body.name !== "string" || !body.name.trim())) return NextResponse.json({ error: "A name is required" }, { status: 400 });
+  try {
+    const id = await createPlatformMetadata(resource as MetadataResource, body, { id: user.id, email: user.email, name: user.displayName });
+    return NextResponse.json({ success: true, id }, { status: 201 });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to save metadata" }, { status: 400 });
+  }
 }
