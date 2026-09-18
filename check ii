@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Controller, FormProvider, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { CheckCircle2, ShieldAlert } from "lucide-react";
+import { CheckCircle2, UserPlus } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -14,15 +14,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { DropdownSelect } from "@/components/ui/dropdown-select";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
-import { FieldError } from "@/components/ui/field";
+import { Checkbox } from "@/components/ui/checkbox";
+import { FieldError, FieldHint } from "@/components/ui/field";
 import { StatusBadge } from "@/components/ui/status-badges";
-import { RichTextEditor } from "@/components/ui/rich-text-editor";
-import { cn, formatDateTime } from "@/lib/utils";
-import { useCurrentUser } from "@/components/hooks/useCurrentUser";
+import { cn, formatDateTime, todayISO } from "@/lib/utils";
 import type { AttachmentMeta } from "@/lib/types";
 import { PageHeader } from "@/components/general-request/PageHeader";
 import { StickyActionBar } from "@/components/general-request/StickyActionBar";
@@ -30,27 +28,23 @@ import { AttachmentsCard } from "@/components/general-request/AttachmentsCard";
 import { ActivityTabs } from "@/components/general-request/ActivityTabs";
 import { useCurrentUser } from "@/components/hooks/useCurrentUser";
 
-export const EXCEPTION_CATEGORIES = [
-  "AI Tools",
-  "Exception against Information Security Policy / Processes",
-  "Handling of PII / PCI Data",
-  "Local Admin Access",
-  "Mobile Device Access",
-  "Patch Management",
-  "Privileged Access",
-  "Security Tools",
-  "USB Access",
-  "Vulnerability Management",
-  "Web Access",
-  "External Email Send",
-  "External Email Receive",
-  "External Email Send & Receive",
-  "Other"
+const EMPLOYEE_TYPES = ["Consultant", "Full Time"] as const;
+const ASSET_DISPATCH_OPTIONS = ["Yes", "No"] as const;
+const ACCESS_OPTIONS = [
+  "Domain ID",
+  "Nice ID",
+  "TMS ID",
+  "Amadeus ID",
+  "Sabre ID",
+  "Farelogix",
+  "OBE Access",
+  "OAP Access",
+  "One Terminal",
+  "PK fare",
+  "None",
 ] as const;
 
-const EXCEPTION_TYPES = ["Permanent", "Temporary"] as const;
-
-const DRAFT_STORAGE_KEY = "itsm.exception-request.draft.v1";
+const DRAFT_STORAGE_KEY = "itsm.hr-onboarding.draft.v1";
 
 const personSchema = z.object({
   id: z.string(),
@@ -59,124 +53,66 @@ const personSchema = z.object({
   department: z.string(),
 });
 
-const richTextValueSchema = z.object({
-  html: z.string(),
-  text: z.string(),
+const onboardingSchema = z.object({
+  name: z.string().trim().min(2, "Name is required"),
+  dateOfJoining: z.string().trim().min(1, "Date of joining is required"),
+  employeeType: z
+    .string()
+    .refine((value) => (EMPLOYEE_TYPES as readonly string[]).includes(value), {
+      message: "Select an employee type",
+    }),
+  designation: z.string().trim().min(1, "Designation is required"),
+  department: z.string().trim().min(1, "Department is required"),
+  supervisorIndia: z.string().trim().min(1, "Supervisor (India) is required"),
+  supervisorUS: z.string().trim().optional().default(""),
+  proposedEmail: z
+    .string()
+    .trim()
+    .min(1, "Proposed email ID is required"),
+  defaultDLs: z.string().trim().optional().default(""),
+  assetDispatch: z
+    .string()
+    .refine(
+      (value) => (ASSET_DISPATCH_OPTIONS as readonly string[]).includes(value),
+      { message: "Select an option" }
+    ),
+  accessRequired: z.array(z.string()).default([]),
+
+  // Assignment and tracking
+  assignedDepartment: z.string().default("Service Desk"),
+  assignedTo: personSchema.nullable().default(null),
+  followers: z.array(personSchema).default([]),
+  tags: z.array(z.string()).max(10, "Maximum of 10 tags").default([]),
+  approvers: z
+    .array(
+      z.object({
+        id: z.string(),
+        name: z.string(),
+        email: z.string(),
+        department: z.string(),
+        status: z
+          .enum(["Active", "Approved", "On Hold", "Cancelled"])
+          .default("Active"),
+        comment: z.string().max(500, "Comment is too long").default(""),
+      })
+    )
+    .default([]),
 });
 
-const exceptionRequestSchema = z
-  .object({
-    name: z.string().trim().min(2, "Name is required"),
-    email: z
-      .string()
-      .trim()
-      .min(1, "Email ID is required")
-      .email("Enter a valid email address"),
-    department: z.string().trim().min(1, "Department is required"),
-    designation: z.string().trim().min(1, "Designation is required"),
-    location: z.string().trim().min(1, "Location is required"),
-    hod: z.string().trim().min(2, "Head of Department is required"),
-    exceptionCategory: z
-      .string()
-      .refine(
-        (value) => (EXCEPTION_CATEGORIES as readonly string[]).includes(value),
-        { message: "Select an exception category" }
-      )
-      ,
-    otherCategory: z.string().trim().default(""),
-    exceptionType: z
-      .string()
-      .refine(
-        (value) => (EXCEPTION_TYPES as readonly string[]).includes(value),
-        { message: "Select an exception type" }
-      ),
-    accessEndDate: z.string().default(""),
-    description: richTextValueSchema,
+type OnboardingValues = z.infer<typeof onboardingSchema>;
 
-    // Assignment and tracking
-    assignedDepartment: z.string().default("Service Desk"),
-    assignedTo: personSchema.nullable().default(null),
-    followers: z.array(personSchema).default([]),
-    tags: z.array(z.string()).max(10, "Maximum of 10 tags").default([]),
-    approvers: z
-      .array(
-        z.object({
-          id: z.string(),
-          name: z.string(),
-          email: z.string(),
-          department: z.string(),
-          status: z
-            .enum(["Active", "Approved", "On Hold", "Cancelled"])
-            .default("Active"),
-          comment: z.string().max(500, "Comment is too long").default(""),
-        })
-      )
-      .default([]),
-  })
-  .superRefine((data, ctx) => {
-    // "Other" category requires a short free-text explanation.
-    if (data.exceptionCategory === "Other" && data.otherCategory.length < 2) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["otherCategory"],
-        message: "Please specify the exception category",
-      });
-    }
-
-    // Description becomes required once an exception type is chosen.
-    if ((EXCEPTION_TYPES as readonly string[]).includes(data.exceptionType)) {
-      const length = data.description.text.trim().length;
-      if (length < 20) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["description"],
-          message: "Description must be at least 20 characters",
-        });
-      } else if (length > 2000) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["description"],
-          message: "Description must be 2,000 characters or fewer",
-        });
-      }
-    }
-
-    if (data.exceptionType === "Temporary") {
-      if (!data.accessEndDate) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["accessEndDate"],
-          message: "Access end date is required for temporary exceptions",
-        });
-      } else {
-        const selectedDate = new Date(`${data.accessEndDate}T00:00:00`);
-        const maxDate = new Date();
-        maxDate.setMonth(maxDate.getMonth() + 6);
-        if (Number.isNaN(selectedDate.getTime()) || selectedDate > maxDate) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["accessEndDate"],
-            message: "Access end date must be within 6 months",
-          });
-        }
-      }
-    }
-  });
-
-type ExceptionRequestValues = z.infer<typeof exceptionRequestSchema>;
-
-const defaultValues: ExceptionRequestValues = {
+const defaultValues: OnboardingValues = {
   name: "",
-  email: "",
-  department: "",
+  dateOfJoining: "",
+  employeeType: "",
   designation: "",
-  location: "",
-  hod: "",
-  exceptionCategory: "",
-  otherCategory: "",
-  exceptionType: "",
-  accessEndDate: "",
-  description: { html: "", text: "" },
+  department: "",
+  supervisorIndia: "",
+  supervisorUS: "",
+  proposedEmail: "",
+  defaultDLs: "",
+  assetDispatch: "",
+  accessRequired: [],
   assignedDepartment: "Service Desk",
   assignedTo: null,
   followers: [],
@@ -186,7 +122,7 @@ const defaultValues: ExceptionRequestValues = {
 
 function generateReferenceId(): string {
   const n = Math.floor(Math.random() * 900000) + 100;
-  return `EXC-${String(n).padStart(6, "0")}`;
+  return `ONB-${String(n).padStart(6, "0")}`;
 }
 
 function SummaryRow({
@@ -206,7 +142,50 @@ function SummaryRow({
   );
 }
 
-export function ExceptionRequestForm() {
+function RadioGroup({
+  name,
+  options,
+  value,
+  invalid,
+  register,
+}: {
+  name: keyof OnboardingValues;
+  options: readonly string[];
+  value: string;
+  invalid?: boolean;
+  register: ReturnType<typeof useForm<OnboardingValues>>["register"];
+}) {
+  return (
+    <div className="mt-1 grid gap-2 sm:grid-cols-2">
+      {options.map((option) => {
+        const checked = value === option;
+        return (
+          <label
+            key={option}
+            className={cn(
+              "flex cursor-pointer items-center gap-3 rounded-md border px-4 py-3 text-sm shadow-sm transition-colors",
+              checked
+                ? "border-primary bg-primary/5 ring-1 ring-primary"
+                : invalid
+                ? "border-destructive bg-card"
+                : "border-input bg-card hover:bg-secondary"
+            )}
+          >
+            <input
+              type="radio"
+              value={option}
+              className="h-4 w-4 accent-blue-600"
+              {...register(name)}
+            />
+            <span className="font-medium text-foreground">{option}</span>
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+export function StaffOnboardingForm() {
   const router = useRouter();
   const createdAt = React.useMemo(() => new Date(), []);
   const { user: currentUser } = useCurrentUser();
@@ -214,8 +193,8 @@ export function ExceptionRequestForm() {
     ? `${DRAFT_STORAGE_KEY}.${currentUser.id}`
     : null;
 
-  const methods = useForm<ExceptionRequestValues>({
-    resolver: zodResolver(exceptionRequestSchema),
+  const methods = useForm<OnboardingValues>({
+    resolver: zodResolver(onboardingSchema),
     defaultValues,
     mode: "onBlur",
   });
@@ -225,9 +204,9 @@ export function ExceptionRequestForm() {
     watch,
     reset,
     getValues,
+    control,
     formState: { errors, isDirty },
   } = methods;
-  const { control } = methods;
 
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [showSuccess, setShowSuccess] = React.useState(false);
@@ -240,13 +219,9 @@ export function ExceptionRequestForm() {
     null
   );
 
-  const selectedCategory = watch("exceptionCategory");
-  const selectedType = watch("exceptionType");
-  const hasExceptionType = (EXCEPTION_TYPES as readonly string[]).includes(
-    selectedType
-  );
+  const employeeType = watch("employeeType");
+  const assetDispatch = watch("assetDispatch");
 
-  // Load any previously saved draft once on mount.
   React.useEffect(() => {
     if (!draftStorageKey) return;
     try {
@@ -260,22 +235,6 @@ export function ExceptionRequestForm() {
       // Ignore malformed drafts.
     }
   }, [draftStorageKey, reset]);
-
-  // Prefill requester fields from the logged-in employee directory record.
-  React.useEffect(() => {
-    if (!currentUser) return;
-    const values = getValues();
-    if (!values.name) methods.setValue("name", currentUser.name, { shouldDirty: false });
-    if (!values.email) methods.setValue("email", currentUser.email, { shouldDirty: false });
-    if (!values.department)
-      methods.setValue("department", currentUser.department, { shouldDirty: false });
-    if (!values.location)
-      methods.setValue("location", currentUser.officeLocation, { shouldDirty: false });
-  }, [currentUser, methods, getValues]);
-
-  // Directory-provided identity fields are shown but not editable.
-  const identityLocked = !!currentUser;
-  const lockedInputClass = "read-only:cursor-not-allowed read-only:bg-secondary";
 
   const saveDraft = () => {
     if (!draftStorageKey) return;
@@ -296,13 +255,12 @@ export function ExceptionRequestForm() {
     }
   };
 
-  const onSubmit = async (values: ExceptionRequestValues) => {
-    // Business requirement attachment is mandatory once a type is chosen.
+  const onSubmit = async (values: OnboardingValues) => {
     if (attachments.length === 0) {
-      setAttachmentError("Attach at least one business requirement document.");
+      setAttachmentError("Attach the required onboarding document.");
       requestAnimationFrame(() => {
         document
-          .getElementById("business-requirement-attachments")
+          .getElementById("onboarding-attachments")
           ?.scrollIntoView({ behavior: "smooth", block: "center" });
       });
       return;
@@ -315,19 +273,17 @@ export function ExceptionRequestForm() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          requestType: "infosec-exception",
+          requestType: "hr-onboarding",
           attachmentIds: attachments
             .map((a) => a.attachmentId)
             .filter(
               (id): id is string =>
                 typeof id === "string" && id.length > 0
             ),
-          title: `Exception — ${
-            values.exceptionCategory === "Other"
-              ? values.otherCategory || "Other"
-              : values.exceptionCategory
-          }`,
-          description: values.description?.text ?? "",
+          title: `Onboarding — ${values.name || "New Joiner"}`,
+          description: `Onboarding request for ${values.name}${
+            values.designation ? ` (${values.designation})` : ""
+          }.`,
           priority: "Medium",
           department: values.department,
           assignedTo: values.assignedTo,
@@ -335,19 +291,19 @@ export function ExceptionRequestForm() {
           approvers: values.approvers,
           followers: values.followers,
           payload: {
-            requesterName: values.name,
-            requesterEmail: values.email,
-            department: values.department,
+            newJoiner: values.name,
+            dateOfJoining: values.dateOfJoining,
+            employeeType: values.employeeType,
             designation: values.designation,
-            location: values.location,
-            hod: values.hod,
-            exceptionCategory:
-              values.exceptionCategory === "Other"
-                ? values.otherCategory
-                : values.exceptionCategory,
-            exceptionType: values.exceptionType,
-            accessEndDate: values.accessEndDate,
-            descriptionHtml: values.description?.html ?? "",
+            department: values.department,
+            supervisorIndia: values.supervisorIndia,
+            supervisorUS: values.supervisorUS,
+            proposedEmail: values.proposedEmail,
+            defaultDLs: values.defaultDLs,
+            assetDispatch: values.assetDispatch,
+            accessRequired: Array.isArray(values.accessRequired)
+              ? values.accessRequired.join(", ")
+              : values.accessRequired,
           },
         }),
       });
@@ -356,13 +312,7 @@ export function ExceptionRequestForm() {
         throw new Error(data.error ?? "Submission failed");
       }
       setReferenceId(data.reference);
-      setSubmittedTitle(
-        `Exception — ${
-          values.exceptionCategory === "Other"
-            ? values.otherCategory || "Other"
-            : values.exceptionCategory
-        }`
-      );
+      setSubmittedTitle(`Onboarding — ${values.name || "New Joiner"}`);
       try {
         if (draftStorageKey) localStorage.removeItem(draftStorageKey);
       } catch {
@@ -388,238 +338,220 @@ export function ExceptionRequestForm() {
           noValidate
           className="mx-auto max-w-6xl px-4 py-6 sm:px-6"
         >
-        <PageHeader
-          formTitle="Exception Request"
-          formDescription="Request an exception to an information security policy or control."
-          icon={ShieldAlert}
-          accent="from-rose-500 to-rose-700 text-white ring-white/20"
-        />
+          <PageHeader
+            formTitle="Staff Onboarding"
+            formDescription="Request onboarding, access, and asset provisioning for a new joiner."
+            icon={UserPlus}
+            accent="from-violet-500 to-violet-700 text-white ring-white/20"
+          />
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-          {/* Left column (wider) */}
-          <div className="space-y-6 lg:col-span-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>Exception Request Form</CardTitle>
-                <CardDescription>
-                  When you submit this form, the owner will see your name and
-                  email address. Fields marked{" "}
-                  <span className="text-destructive">*</span> are required.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-5">
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div>
-                    <Label htmlFor="name" required>
-                      Name
-                    </Label>
-                    <Input
-                      id="name"
-                      placeholder="Your full name"
-                      readOnly={identityLocked}
-                      className={lockedInputClass}
-                      invalid={!!errors.name}
-                      {...register("name")}
-                    />
-                    <FieldError message={errors.name?.message} />
-                  </div>
-
-                  <div>
-                    <Label htmlFor="email" required>
-                      Email ID
-                    </Label>
-                    <Input
-                      id="email"
-                      type="email"
-                      inputMode="email"
-                      placeholder="you@fareportal.com"
-                      readOnly={identityLocked}
-                      className={lockedInputClass}
-                      invalid={!!errors.email}
-                      {...register("email")}
-                    />
-                    <FieldError message={errors.email?.message} />
-                  </div>
-
-                  <div>
-                    <Label htmlFor="department" required>
-                      Department
-                    </Label>
-                    <Input
-                      id="department"
-                      placeholder="e.g. IT Engineering"
-                      readOnly={identityLocked}
-                      className={lockedInputClass}
-                      invalid={!!errors.department}
-                      {...register("department")}
-                    />
-                    <FieldError message={errors.department?.message} />
-                  </div>
-
-                  <div>
-                    <Label htmlFor="designation" required>
-                      Designation
-                    </Label>
-                    <Input
-                      id="designation"
-                      placeholder="e.g. Senior Engineer"
-                      invalid={!!errors.designation}
-                      {...register("designation")}
-                    />
-                    <FieldError message={errors.designation?.message} />
-                  </div>
-
-                  <div>
-                    <Label htmlFor="location" required>
-                      Location
-                    </Label>
-                    <Input
-                      id="location"
-                      placeholder="e.g. Gurugram"
-                      readOnly={identityLocked}
-                      className={lockedInputClass}
-                      invalid={!!errors.location}
-                      {...register("location")}
-                    />
-                    <FieldError message={errors.location?.message} />
-                  </div>
-
-                  <div>
-                    <Label htmlFor="hod" required>
-                      HOD (Head of Department)
-                    </Label>
-                    <Input
-                      id="hod"
-                      placeholder="Name of your department head"
-                      invalid={!!errors.hod}
-                      {...register("hod")}
-                    />
-                    <FieldError message={errors.hod?.message} />
-                  </div>
-                </div>
-
-                <div>
-                  <Label htmlFor="exceptionCategory" required>
-                    Exception Category
-                  </Label>
-                  <Controller
-                    control={control}
-                    name="exceptionCategory"
-                    render={({ field }) => (
-                      <DropdownSelect
-                        id="exceptionCategory"
-                        value={field.value}
-                        onChange={field.onChange}
-                        onBlur={field.onBlur}
-                        options={EXCEPTION_CATEGORIES}
-                        invalid={!!errors.exceptionCategory}
-                      />
-                    )}
-                  />
-                  <FieldError message={errors.exceptionCategory?.message} />
-                </div>
-
-                {selectedCategory === "Other" && (
-                  <div>
-                    <Label htmlFor="otherCategory" required>
-                      Please specify
-                    </Label>
-                    <Input
-                      id="otherCategory"
-                      placeholder="Describe the exception category"
-                      invalid={!!errors.otherCategory}
-                      {...register("otherCategory")}
-                    />
-                    <FieldError message={errors.otherCategory?.message} />
-                  </div>
-                )}
-
-                <div>
-                  <Label required>Exception Type</Label>
-                  <div className="mt-1 grid gap-2 sm:grid-cols-2">
-                    {EXCEPTION_TYPES.map((option) => {
-                      const checked = selectedType === option;
-                      return (
-                        <label
-                          key={option}
-                          className={cn(
-                            "flex cursor-pointer items-center gap-3 rounded-md border px-4 py-3 text-sm shadow-sm transition-colors",
-                            checked
-                              ? "border-primary bg-primary/5 ring-1 ring-primary"
-                              : "border-input bg-card hover:bg-secondary"
-                          )}
-                        >
-                          <input
-                            type="radio"
-                            value={option}
-                            className="h-4 w-4 accent-blue-600"
-                            {...register("exceptionType")}
-                          />
-                          <span className="font-medium text-foreground">
-                            {option}
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                  <FieldError message={errors.exceptionType?.message} />
-                </div>
-
-                {hasExceptionType && (
-                  <div className="space-y-4">
-                    {selectedType === "Temporary" && (
-                      <div>
-                        <Label htmlFor="accessEndDate" required>
-                          Access End Date
-                        </Label>
-                        <p className="mb-2 text-xs text-muted-foreground">
-                          Maximum duration: 6 months.
-                        </p>
-                        <Input
-                          id="accessEndDate"
-                          type="date"
-                          invalid={!!errors.accessEndDate}
-                          {...register("accessEndDate")}
-                        />
-                        <FieldError message={errors.accessEndDate?.message} />
-                      </div>
-                    )}
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+            {/* Left column (wider) */}
+            <div className="space-y-6 lg:col-span-2">
+              <Card>
+                <CardHeader>
+                  <CardTitle>New Staff Onboarding Request</CardTitle>
+                  <CardDescription>
+                    When you submit this form, the owner will see your name and
+                    email address. Fields marked{" "}
+                    <span className="text-destructive">*</span> are required.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-5">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div>
-                      <Label required>Description</Label>
-                      <Controller
-                        name="description"
-                        control={control}
-                        render={({ field }) => (
-                          <RichTextEditor
-                            value={field.value?.html ?? ""}
-                            onChange={(html, text) =>
-                              field.onChange({ html, text })
-                            }
-                            onBlur={field.onBlur}
-                            ariaLabel="Description"
-                            maxLength={2000}
-                            invalid={!!errors.description}
-                            placeholder="Describe the exception you need, the systems or controls involved, the duration, and any compensating controls."
-                          />
-                        )}
+                      <Label htmlFor="name" required>
+                        Name
+                      </Label>
+                      <Input
+                        id="name"
+                        placeholder="New joiner's full name"
+                        invalid={!!errors.name}
+                        {...register("name")}
                       />
-                      <FieldError
-                        message={errors.description?.message as string}
+                      <FieldError message={errors.name?.message} />
+                    </div>
+
+                    <div>
+                      <Label htmlFor="dateOfJoining" required>
+                        Date of Joining
+                      </Label>
+                      <Input
+                        id="dateOfJoining"
+                        type="date"
+                        min={todayISO()}
+                        invalid={!!errors.dateOfJoining}
+                        {...register("dateOfJoining")}
                       />
+                      <FieldError message={errors.dateOfJoining?.message} />
                     </div>
                   </div>
-                )}
-              </CardContent>
-            </Card>
 
-            {hasExceptionType && (
-              <div id="business-requirement-attachments" className="space-y-2">
+                  <div>
+                    <Label required>Employee Type</Label>
+                    <RadioGroup
+                      name="employeeType"
+                      options={EMPLOYEE_TYPES}
+                      value={employeeType}
+                      invalid={!!errors.employeeType}
+                      register={register}
+                    />
+                    <FieldError message={errors.employeeType?.message} />
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div>
+                      <Label htmlFor="designation" required>
+                        Designation
+                      </Label>
+                      <Input
+                        id="designation"
+                        placeholder="e.g. Senior Engineer"
+                        invalid={!!errors.designation}
+                        {...register("designation")}
+                      />
+                      <FieldError message={errors.designation?.message} />
+                    </div>
+
+                    <div>
+                      <Label htmlFor="department" required>
+                        Department
+                      </Label>
+                      <Input
+                        id="department"
+                        placeholder="e.g. IT Engineering"
+                        invalid={!!errors.department}
+                        {...register("department")}
+                      />
+                      <FieldError message={errors.department?.message} />
+                    </div>
+
+                    <div>
+                      <Label htmlFor="supervisorIndia" required>
+                        Supervisor (India)
+                      </Label>
+                      <Input
+                        id="supervisorIndia"
+                        placeholder="Reporting supervisor in India"
+                        invalid={!!errors.supervisorIndia}
+                        {...register("supervisorIndia")}
+                      />
+                      <FieldError message={errors.supervisorIndia?.message} />
+                    </div>
+
+                    <div>
+                      <Label htmlFor="supervisorUS">Supervisor (US)</Label>
+                      <Input
+                        id="supervisorUS"
+                        placeholder="Reporting supervisor in US"
+                        invalid={!!errors.supervisorUS}
+                        {...register("supervisorUS")}
+                      />
+                      <FieldError message={errors.supervisorUS?.message} />
+                    </div>
+
+                    <div>
+                      <Label htmlFor="proposedEmail" required>
+                        New Joiner Proposed Email ID
+                      </Label>
+                      <Input
+                        id="proposedEmail"
+                        placeholder="proposed.name@fareportal.com"
+                        invalid={!!errors.proposedEmail}
+                        {...register("proposedEmail")}
+                      />
+                      <FieldError message={errors.proposedEmail?.message} />
+                    </div>
+
+                    <div>
+                      <Label htmlFor="defaultDLs">Default DLs Email ID</Label>
+                      <Input
+                        id="defaultDLs"
+                        placeholder="e.g. Team India, HOD India"
+                        invalid={!!errors.defaultDLs}
+                        {...register("defaultDLs")}
+                      />
+                      <FieldHint>
+                        Distribution lists the new joiner should be added to.
+                      </FieldHint>
+                      <FieldError message={errors.defaultDLs?.message} />
+                    </div>
+                  </div>
+
+                  <div>
+                    <Label required>If asset needs to be dispatched</Label>
+                    <RadioGroup
+                      name="assetDispatch"
+                      options={ASSET_DISPATCH_OPTIONS}
+                      value={assetDispatch}
+                      invalid={!!errors.assetDispatch}
+                      register={register}
+                    />
+                    <FieldError message={errors.assetDispatch?.message} />
+                  </div>
+
+                  <div>
+                    <Label>Access Required to be given</Label>
+                    <Controller
+                      control={control}
+                      name="accessRequired"
+                      render={({ field }) => {
+                        const selected = field.value ?? [];
+                        const toggle = (option: string) => {
+                          if (option === "None") {
+                            field.onChange(
+                              selected.includes("None") ? [] : ["None"]
+                            );
+                            return;
+                          }
+                          const withoutNone = selected.filter(
+                            (item) => item !== "None"
+                          );
+                          field.onChange(
+                            withoutNone.includes(option)
+                              ? withoutNone.filter((item) => item !== option)
+                              : [...withoutNone, option]
+                          );
+                        };
+                        return (
+                          <div className="mt-1 grid gap-2 sm:grid-cols-2">
+                            {ACCESS_OPTIONS.map((option) => {
+                              const checked = selected.includes(option);
+                              return (
+                                <label
+                                  key={option}
+                                  className={cn(
+                                    "flex cursor-pointer items-center gap-3 rounded-md border px-4 py-2.5 text-sm shadow-sm transition-colors",
+                                    checked
+                                      ? "border-primary bg-primary/5"
+                                      : "border-input bg-card hover:bg-secondary"
+                                  )}
+                                >
+                                  <Checkbox
+                                    checked={checked}
+                                    onCheckedChange={() => toggle(option)}
+                                  />
+                                  <span className="font-medium text-foreground">
+                                    {option}
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        );
+                      }}
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+
+              <div id="onboarding-attachments" className="space-y-2">
                 <div>
-                  <Label required>Business Requirement Document</Label>
-                  <p className="text-xs text-muted-foreground">
-                    Attach the document that justifies this exception —
-                    business requirement, approvals, or supporting evidence.
-                  </p>
+                  <Label required>Attachment</Label>
+                  <FieldHint>
+                    Upload the supporting onboarding document (Word, Excel, PPT,
+                    PDF, image, video, or audio).
+                  </FieldHint>
                 </div>
                 <AttachmentsCard
                   files={attachments}
@@ -630,152 +562,151 @@ export function ExceptionRequestForm() {
                 />
                 <FieldError message={attachmentError ?? undefined} />
               </div>
-            )}
 
-            <ActivityTabs />
+              <ActivityTabs />
+            </div>
+
+            {/* Right column */}
+            <div className="space-y-6 lg:col-span-1">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Request Information</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <SummaryRow label="Status">
+                    <StatusBadge status="Draft" />
+                  </SummaryRow>
+
+                  <div className="space-y-1 border-t border-border pt-4">
+                    <SummaryRow label="Request Type">
+                      Staff Onboarding
+                    </SummaryRow>
+                    <SummaryRow label="Created Date">
+                      {formatDateTime(createdAt)}
+                    </SummaryRow>
+                    <SummaryRow label="Reference ID">
+                      {referenceId ? (
+                        <span className="font-mono text-primary">
+                          {referenceId}
+                        </span>
+                      ) : (
+                        <span className="italic text-muted-foreground">
+                          Generated after submission
+                        </span>
+                      )}
+                    </SummaryRow>
+                  </div>
+
+                  <div className="space-y-1 border-t border-border pt-4">
+                    <SummaryRow label="Employee Type">
+                      {employeeType || (
+                        <span className="italic text-muted-foreground">
+                          Not selected
+                        </span>
+                      )}
+                    </SummaryRow>
+                    <SummaryRow label="Asset Dispatch">
+                      {assetDispatch || (
+                        <span className="italic text-muted-foreground">
+                          Not selected
+                        </span>
+                      )}
+                    </SummaryRow>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
           </div>
 
-          {/* Right column */}
-          <div className="space-y-6 lg:col-span-1">
-            <Card>
-              <CardHeader>
-                <CardTitle>Request Information</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <SummaryRow label="Status">
-                  <StatusBadge status="Draft" />
-                </SummaryRow>
+          <StickyActionBar
+            onCancel={handleCancel}
+            onSaveDraft={saveDraft}
+            isSubmitting={isSubmitting}
+            draftSaved={draftSaved}
+          />
+        </form>
 
-                <div className="space-y-1 border-t border-border pt-4">
-                  <SummaryRow label="Request Type">
-                    Exception Request
-                  </SummaryRow>
-                  <SummaryRow label="Created Date">
-                    {formatDateTime(createdAt)}
-                  </SummaryRow>
-                  <SummaryRow label="Reference ID">
-                    {referenceId ? (
-                      <span className="font-mono text-primary">
-                        {referenceId}
-                      </span>
-                    ) : (
-                      <span className="italic text-muted-foreground">
-                        Generated after submission
-                      </span>
-                    )}
-                  </SummaryRow>
-                </div>
-
-                <div className="space-y-1 border-t border-border pt-4">
-                  <SummaryRow label="Category">
-                    {selectedCategory || (
-                      <span className="italic text-muted-foreground">
-                        Not selected
-                      </span>
-                    )}
-                  </SummaryRow>
-                  <SummaryRow label="Exception Type">
-                    {selectedType || (
-                      <span className="italic text-muted-foreground">
-                        Not selected
-                      </span>
-                    )}
-                  </SummaryRow>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        </div>
-
-        <StickyActionBar
-          onCancel={handleCancel}
-          onSaveDraft={saveDraft}
-          isSubmitting={isSubmitting}
-          draftSaved={draftSaved}
+        {/* Cancel confirmation */}
+        <Dialog
+          open={showCancel}
+          onClose={() => setShowCancel(false)}
+          title="Discard this request?"
+          description="You have unsaved changes. If you leave now, your changes will be lost."
+          footer={
+            <>
+              <Button variant="outline" onClick={() => setShowCancel(false)}>
+                Keep Editing
+              </Button>
+              <Button variant="destructive" onClick={() => router.push("/")}>
+                Discard Changes
+              </Button>
+            </>
+          }
         />
-      </form>
 
-      {/* Cancel confirmation */}
-      <Dialog
-        open={showCancel}
-        onClose={() => setShowCancel(false)}
-        title="Discard this request?"
-        description="You have unsaved changes. If you leave now, your changes will be lost."
-        footer={
-          <>
-            <Button variant="outline" onClick={() => setShowCancel(false)}>
-              Keep Editing
-            </Button>
-            <Button variant="destructive" onClick={() => router.push("/")}>
-              Discard Changes
-            </Button>
-          </>
-        }
-      />
-
-      {/* Success message */}
-      <Dialog
-        open={showSuccess}
-        onClose={() => setShowSuccess(false)}
-        title="Request submitted"
-        hideClose
-        footer={
-          <>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setShowSuccess(false);
-                reset(defaultValues);
-                setReferenceId(null);
-                setAttachments([]);
-                setAttachmentError(null);
-              }}
-            >
-              Create Another
-            </Button>
-            <Button
-              variant="success"
-              onClick={() =>
-                router.push(
-                  `/requests/${encodeURIComponent(referenceId ?? "")}`
-                )
-              }
-            >
-              View Request
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-4">
-          <div className="flex flex-col items-center gap-3 text-center">
-            <CheckCircle2 className="h-12 w-12 text-success" />
-            <h3 className="text-lg font-semibold">
-              Request Submitted Successfully
-            </h3>
-            <p className="text-sm text-muted-foreground">
-              Your request has been created and is now available for tracking.
-            </p>
-          </div>
-          <div className="rounded-lg border border-border bg-muted/40 p-4">
-            <div className="grid gap-2 text-sm">
-              <div>
-                <span className="font-medium">Request ID:</span>{" "}
-                {referenceId}
-              </div>
-              <div>
-                <span className="font-medium">Title:</span> {submittedTitle}
-              </div>
-              <div>
-                <span className="font-medium">Status:</span> New
-              </div>
-              <div>
-                <span className="font-medium">Created:</span>{" "}
-                {new Date().toLocaleString()}
+        {/* Success message */}
+        <Dialog
+          open={showSuccess}
+          onClose={() => setShowSuccess(false)}
+          title="Request submitted"
+          hideClose
+          footer={
+            <>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setShowSuccess(false);
+                  reset(defaultValues);
+                  setReferenceId(null);
+                  setAttachments([]);
+                  setAttachmentError(null);
+                }}
+              >
+                Create Another
+              </Button>
+              <Button
+                variant="success"
+                onClick={() =>
+                  router.push(
+                    `/requests/${encodeURIComponent(referenceId ?? "")}`
+                  )
+                }
+              >
+                View Request
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-4">
+            <div className="flex flex-col items-center gap-3 text-center">
+              <CheckCircle2 className="h-12 w-12 text-success" />
+              <h3 className="text-lg font-semibold">
+                Request Submitted Successfully
+              </h3>
+              <p className="text-sm text-muted-foreground">
+                Your request has been created and is now available for tracking.
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-muted/40 p-4">
+              <div className="grid gap-2 text-sm">
+                <div>
+                  <span className="font-medium">Request ID:</span>{" "}
+                  {referenceId}
+                </div>
+                <div>
+                  <span className="font-medium">Title:</span> {submittedTitle}
+                </div>
+                <div>
+                  <span className="font-medium">Status:</span> New
+                </div>
+                <div>
+                  <span className="font-medium">Created:</span>{" "}
+                  {new Date().toLocaleString()}
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      </Dialog>
+        </Dialog>
       </main>
     </FormProvider>
   );
