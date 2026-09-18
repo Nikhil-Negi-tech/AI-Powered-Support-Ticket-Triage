@@ -1,863 +1,589 @@
-import { q, q1, withTransaction } from "@/lib/db/client";
+/**
+ * Centralized notification orchestrator.
+ *
+ * Every business event routes through one of the `notify*` functions here.
+ * Each function fans out to the enabled channels (in-app bell + email today,
+ * Teams/Slack in future), deduplicates recipients, and records a delivery
+ * audit row. Notifications must NEVER break the core workflow, so every public
+ * function swallows and logs its own errors.
+ */
+import { q, q1 } from "@/lib/db/client";
+import { getUserById } from "@/lib/users-db";
+import type { ActorRef } from "./requests";
 import {
-  notifyStatusChanged,
-  notifyAssignmentChanged,
-  notifyApprovalDecision,
-  notifyApprovalRequired,
-} from "@/lib/services/notifications";
-import { getPublishedWorkflow, validateWorkflowTransition } from "@/lib/services/admin-platform";
+  deduplicateRecipients,
+  excludeRecipient,
+  getRequestPath,
+  getRequestUrl,
+  type NotificationType,
+  type Recipient,
+} from "./notification-provider";
+import { getEmailProvider } from "./outlook-provider";
+import { createNotification, logDelivery } from "./in-app-notifications";
+import type { EmailContent } from "@/lib/templates/email/layout";
+import { buildRequestCreatedEmail } from "@/lib/templates/email/request-created";
+import { buildApprovalRequiredEmail } from "@/lib/templates/email/approval-required";
+import {
+  buildApprovalDecisionEmail,
+  type ApprovalDecision,
+} from "@/lib/templates/email/approval-decision";
+import { buildAssignmentEmail } from "@/lib/templates/email/assignment";
+import { buildStatusEmail } from "@/lib/templates/email/status";
+import { buildCommentEmail } from "@/lib/templates/email/comment";
+import { buildFollowerEmail } from "@/lib/templates/email/follower";
+import { buildMentionEmail } from "@/lib/templates/email/mention";
+import { isNotificationEnabled } from "@/lib/services/admin-platform";
 
-export type RequestType = string;
+/* ------------------------------------------------------------------ */
+/* Request context loading                                             */
+/* ------------------------------------------------------------------ */
 
-const REFERENCE_PREFIX: Record<string, string> = {
-  general: "GEN",
-  "hr-onboarding": "ONB",
-  "hr-offboarding": "OFB",
-  "infosec-exception": "EXC",
+const TYPE_LABELS: Record<string, string> = {
+  general: "General Request",
+  "hr-onboarding": "HR Onboarding",
+  "hr-offboarding": "HR Offboarding",
+  "infosec-exception": "InfoSec Exception",
 };
 
-function getReferencePrefix(requestType: string): string {
-  const known = REFERENCE_PREFIX[requestType];
-  if (known) return known;
-  const prefix = requestType.replace(/[^a-z0-9]/gi, "").slice(0, 3).toUpperCase();
-  return prefix || "REQ";
-}
-
-export interface ActorRef {
+interface RequestContext {
   id: string;
-  name: string;
-  email: string;
-}
-
-export interface ApproverInput {
-  id: string;
-  name: string;
-  email: string;
-  status?: string;
-  comment?: string;
-}
-
-export interface CreateRequestInput {
-  requestType: RequestType;
+  reference: string;
   title: string;
-  description?: string;
-  status?: string;
-  priority?: string;
-  requestedBy: ActorRef;
-  requestedFor?: ActorRef | null;
-  requesterDepartment?: string;
-  requestedForDepartment?: string;
-  department?: string;
-  assignedTo?: ActorRef | null;
-  assignedDepartment?: string;
-  approvers?: ApproverInput[];
-  followers?: ActorRef[];
-  payload?: Record<string, unknown>;
+  status: string;
+  priority: string;
+  requestType: string;
+  requestTypeLabel: string;
+  requesterId: string | null;
+  requesterName: string;
+  requesterEmail: string;
+  requestedForId: string | null;
+  requestedForName: string | null;
+  requestedForEmail: string | null;
+  assignedToId: string | null;
+  assignedToName: string | null;
+  assignedDepartment: string;
+  followers: Recipient[];
+  approvers: Recipient[];
 }
 
-export interface CreatedRequest {
+interface RequestRow {
   id: string;
   reference: string;
-}
-
-/** Creates a request and all related rows atomically, logging the first activity. */
-export async function createRequest(
-  input: CreateRequestInput
-): Promise<CreatedRequest> {
-  const workflow = await getPublishedWorkflow(input.requestType, input.department, input.priority);
-  const workflowInitialStatus = workflow?.definition?.initialStatus;
-  const initialStatus = typeof workflowInitialStatus === "string"
-    ? workflowInitialStatus
-    : input.status ?? "Draft";
-  return withTransaction(async (client) => {
-    const seq = await client.query<{ n: string }>(
-      "SELECT nextval('request_reference_seq') AS n"
-    );
-    const reference = `${getReferencePrefix(input.requestType)}-${String(
-      seq.rows[0].n
-    ).padStart(6, "0")}`;
-
-    const inserted = await client.query<{ id: string }>(
-      `INSERT INTO service_requests
-         (reference, request_type, title, description, status, priority,
-          requested_by, requester_name, requester_email, requester_department,
-          requested_for, requested_for_name, requested_for_email, requested_for_department,
-          department, assigned_to, assigned_to_name, assigned_department, payload)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
-       RETURNING id`,
-      [
-        reference,
-        input.requestType,
-        input.title,
-        input.description ?? "",
-        initialStatus,
-        input.priority ?? "Medium",
-        input.requestedBy.id,
-        input.requestedBy.name,
-        input.requestedBy.email,
-        input.requesterDepartment ?? "",
-        input.requestedFor?.id ?? null,
-        input.requestedFor?.name ?? null,
-        input.requestedFor?.email ?? null,
-        input.requestedForDepartment ?? "",
-        input.department ?? "",
-        input.assignedTo?.id ?? null,
-        input.assignedTo?.name ?? null,
-        input.assignedDepartment ?? "",
-        JSON.stringify(input.payload ?? {}),
-      ]
-    );
-    const requestId = inserted.rows[0].id;
-
-    for (const approver of input.approvers ?? []) {
-      await client.query(
-        `INSERT INTO request_approvers
-           (request_id, approver_id, approver_name, approver_email, approval_status, approval_comment)
-         VALUES ($1,$2,$3,$4,$5,$6)
-         ON CONFLICT (request_id, approver_id) DO NOTHING`,
-        [
-          requestId,
-          approver.id,
-          approver.name,
-          approver.email,
-          approver.status ?? "Active",
-          approver.comment ?? "",
-        ]
-      );
-    }
-
-    for (const follower of input.followers ?? []) {
-      await client.query(
-        `INSERT INTO request_followers
-           (request_id, user_id, user_name, user_email, added_by)
-         VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (request_id, user_id) DO NOTHING`,
-        [requestId, follower.id, follower.name, follower.email, input.requestedBy.id]
-      );
-    }
-
-    if (input.assignedTo || input.assignedDepartment) {
-      await client.query(
-        `INSERT INTO request_assignments
-           (request_id, assigned_to, assigned_to_name, assigned_department, assigned_by)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [
-          requestId,
-          input.assignedTo?.id ?? null,
-          input.assignedTo?.name ?? null,
-          input.assignedDepartment ?? "",
-          input.requestedBy.id,
-        ]
-      );
-    }
-
-    await client.query(
-      `INSERT INTO request_activity
-         (request_id, activity_type, description, performed_by, performed_by_name)
-       VALUES ($1, 'Request Created', $2, $3, $4)`,
-      [
-        requestId,
-        `created request ${reference}.`,
-        input.requestedBy.id,
-        input.requestedBy.name,
-      ]
-    );
-
-    return { id: requestId, reference };
-  });
-}
-
-export interface RequestListItem {
-  id: string;
-  reference: string;
+  title: string;
+  status: string;
+  priority: string;
   request_type: string;
-  title: string;
-  status: string;
-  priority: string;
-  department: string;
+  requested_by: string | null;
   requester_name: string;
-  assigned_to_name: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ListRequestsOptions {
-  status?: string;
-  department?: string;
-  requestType?: string;
-  priority?: string;
-  open?: boolean;
-  fromDate?: string;
-  toDate?: string;
-  requestedBy?: string;
-  assignedTo?: string; // NEW
-  assignedToMode?: "eq" | "neq";
-  search?: string;
-  limit?: number;
-  offset?: number;
-}
-
-/** Paginated, filterable request list (newest first). */
-export async function listRequests(
-  options: ListRequestsOptions = {}
-): Promise<{ items: RequestListItem[]; total: number }> {
-  const conditions = ["deleted_at IS NULL"];
-  const params: unknown[] = [];
-
-  const add = (clause: string, value: unknown) => {
-    params.push(value);
-    conditions.push(clause.replace("$?", `$${params.length}`));
-  };
-
-  if (options.status) add("status = $?", options.status);
-  if (options.department) add("lower(department) = lower($?)", options.department);
-  if (options.requestType) add("request_type = $?", options.requestType);
-  if (options.priority) add("priority = $?", options.priority);
-  if (options.open) {
-    conditions.push(
-      "status IN ('New','Assigned','In Progress','On Hold')"
-    );
-  }
-
-  if (options.fromDate)
-    add("created_at >= $?::date", options.fromDate);
-
-  if (options.toDate)
-    add(
-      "created_at < ($?::date + interval '1 day')",
-      options.toDate
-    );
-  if (options.assignedTo) {
-    const isNotEquals = options.assignedToMode === "neq";
-
-    if (options.assignedTo === "__UNASSIGNED__") {
-      conditions.push(
-        isNotEquals
-          ? "assigned_to_name IS NOT NULL"
-          : "assigned_to_name IS NULL"
-      );
-    } else {
-      add(
-        isNotEquals
-          ? "assigned_to_name <> $?"
-          : "assigned_to_name = $?",
-        options.assignedTo
-      );
-    }
-  }
-  if (options.requestedBy)
-    add("requested_by = $?", options.requestedBy);
-
-  if (options.search) {
-    params.push(`%${options.search.trim()}%`);
-    const p = `$${params.length}`;
-    conditions.push(
-      `(reference ILIKE ${p} OR title ILIKE ${p} OR requester_name ILIKE ${p})`
-    );
-  }
-
-  const where = `WHERE ${conditions.join(" AND ")}`;
-  const limit = Math.min(Math.max(options.limit ?? 25, 1), 100);
-  const offset = Math.max(options.offset ?? 0, 0);
-
-  const totalRow = await q1<{ n: string }>(
-    `SELECT COUNT(*)::int AS n FROM service_requests ${where}`,
-    params
-  );
-
-  const items = await q<RequestListItem>(
-    `SELECT id, reference, request_type, title, status, priority, department,
-            requester_name, assigned_to_name, created_at, updated_at
-       FROM service_requests ${where}
-      ORDER BY created_at DESC
-      LIMIT ${limit} OFFSET ${offset}`,
-    params
-  );
-
-  return { items, total: Number(totalRow?.n ?? 0) };
-}
-
-/** Resolves the internal UUID for a request reference (null when missing). */
-export async function getRequestIdByReference(
-  reference: string
-): Promise<string | null> {
-  const row = await q1<{ id: string }>(
-    `SELECT id FROM service_requests WHERE reference = $1 AND deleted_at IS NULL`,
-    [reference]
-  );
-  return row?.id ?? null;
-}
-
-/** Full request with approvers, followers, comments and activity timeline. */
-export async function getRequestByReference(reference: string) {
-  const request = await q1(
-    `SELECT * FROM service_requests WHERE reference = $1 AND deleted_at IS NULL`,
-    [reference]
-  );
-  if (!request) return null;
-  const id = (request as { id: string }).id;
-
-  const [approvers, followers, comments, activity] = await Promise.all([
-    q("SELECT * FROM request_approvers WHERE request_id = $1 ORDER BY created_at", [id]),
-    q("SELECT * FROM request_followers WHERE request_id = $1 ORDER BY added_at", [id]),
-    q("SELECT * FROM request_comments WHERE request_id = $1 ORDER BY created_at", [id]),
-    q("SELECT * FROM request_activity WHERE request_id = $1 ORDER BY created_at", [id]),
-  ]);
-
-  return { request, approvers, followers, comments, activity };
-}
-
-/** Updates status and records a status-change activity. */
-export async function updateRequestStatus(
-  requestId: string,
-  status: string,
-  actor: ActorRef
-): Promise<void> {
-  await withTransaction(async (client) => {
-    const completed =
-      status === "Resolved" || status === "Closed" ? "now()" : "completed_at";
-    await client.query(
-      `UPDATE service_requests
-          SET status = $2, updated_at = now(), completed_at = ${completed}
-        WHERE id = $1`,
-      [requestId, status]
-    );
-    await client.query(
-      `INSERT INTO request_activity
-         (request_id, activity_type, description, performed_by, performed_by_name)
-       VALUES ($1, 'Status Changed', $2, $3, $4)`,
-      [requestId, `changed the status to ${status}.`, actor.id, actor.name]
-    );
-  });
-
-  void notifyStatusChanged(
-    requestId,
-    "", // old status unavailable in this method
-    status,
-    actor
-  );
-}
-
-export interface ManageUpdateInput {
-  status?: string;
-  priority?: string;
-  assignedToId?: string | null;
-  assignedToName?: string | null;
-  assignedDepartment?: string | null;
-}
-
-interface ManagedRow {
-  status: string;
-  priority: string;
+  requester_email: string;
+  requested_for: string | null;
+  requested_for_name: string | null;
+  requested_for_email: string | null;
   assigned_to: string | null;
   assigned_to_name: string | null;
   assigned_department: string;
 }
 
-/**
- * Applies admin/ops changes to status, priority and assignment atomically,
- * logging one activity entry per field that actually changed. Returns the
- * number of changes persisted (0 when nothing differed).
- */
-export async function updateRequestManaged(
-  requestId: string,
-  changes: ManageUpdateInput,
-  actor: ActorRef
-): Promise<number> {
-  if (changes.status !== undefined) {
-    const current = await q1<{ request_type: string; status: string }>(
-      `SELECT request_type, status FROM service_requests WHERE id = $1 AND deleted_at IS NULL`,
+/** Load everything the orchestrator needs about a request (or null). */
+async function loadContext(requestId: string): Promise<RequestContext | null> {
+  const row = await q1<RequestRow>(
+    `SELECT id, reference, title, status, priority, request_type,
+            requested_by, requester_name, requester_email,
+            requested_for, requested_for_name, requested_for_email,
+            assigned_to, assigned_to_name, assigned_department
+       FROM service_requests WHERE id = $1`,
+    [requestId]
+  );
+  if (!row) return null;
+
+  const [followerRows, approverRows] = await Promise.all([
+    q<{ user_id: string; user_name: string; user_email: string }>(
+      `SELECT user_id, user_name, user_email FROM request_followers WHERE request_id = $1`,
       [requestId]
-    );
-    if (!current) throw new Error("Request not found");
-    await validateWorkflowTransition(current.request_type, current.status, changes.status);
-  }
-  const result = await withTransaction(async (client) => {
-    const cur = await client.query<ManagedRow>(
-      `SELECT status, priority, assigned_to, assigned_to_name, assigned_department
-         FROM service_requests
-        WHERE id = $1 AND deleted_at IS NULL
-        FOR UPDATE`,
+    ),
+    q<{ approver_id: string; approver_name: string; approver_email: string }>(
+      `SELECT approver_id, approver_name, approver_email FROM request_approvers WHERE request_id = $1`,
       [requestId]
-    );
-    if (cur.rowCount === 0) throw new Error("Request not found");
-    const row = cur.rows[0];
-
-    let assignmentChangedForNotification = false;
-
-    let statusChangedForNotification = false;
-    let oldStatusForNotification = "";
-    let newStatusForNotification = "";
-
-    const params: unknown[] = [requestId];
-    const sets: string[] = [];
-    const activities: { type: string; desc: string }[] = [];
-    const set = (col: string, val: unknown) => {
-      params.push(val);
-      sets.push(`${col} = $${params.length}`);
-    };
-
-    if (changes.status !== undefined && changes.status !== row.status) {
-      statusChangedForNotification = true;
-      oldStatusForNotification = row.status;
-      newStatusForNotification = changes.status;
-
-      set("status", changes.status);
-
-      const completed =
-        changes.status === "Resolved" ||
-        changes.status === "Closed";
-
-      sets.push(
-        `completed_at = ${completed ? "now()" : "completed_at"}`
-      );
-
-      activities.push({
-        type: "Status Changed",
-        desc: `changed the status from ${row.status} to ${changes.status}.`,
-      });
-    }
-
-    if (changes.priority !== undefined && changes.priority !== row.priority) {
-      set("priority", changes.priority);
-      activities.push({
-        type: "Priority Changed",
-        desc: `changed the priority from ${row.priority} to ${changes.priority}.`,
-      });
-    }
-
-    const nextAssignee = changes.assignedToId ?? null;
-    const nextAssigneeName = changes.assignedToName ?? null;
-    const nextDept =
-      changes.assignedDepartment ?? undefined;
-
-    const assigneeChanged =
-      changes.assignedToId !== undefined && nextAssignee !== row.assigned_to;
-    const deptChanged =
-      nextDept !== undefined && nextDept !== row.assigned_department;
-
-    if (assigneeChanged || deptChanged) {
-      assignmentChangedForNotification = true;
-      if (changes.assignedToId !== undefined) {
-        set("assigned_to", nextAssignee);
-        set("assigned_to_name", nextAssigneeName);
-      }
-      if (nextDept !== undefined) {
-        set("assigned_department", nextDept);
-      }
-      const who = nextAssigneeName || "Unassigned";
-      const where = nextDept || row.assigned_department || "—";
-      activities.push({
-        type: "Assignment Changed",
-        desc: `assigned the request to ${who} (${where}).`,
-      });
-      await client.query(
-        `INSERT INTO request_assignments
-           (request_id, assigned_to, assigned_to_name, assigned_department, assigned_by)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [
-          requestId,
-          nextAssignee,
-          nextAssigneeName,
-          nextDept ?? row.assigned_department,
-          actor.id,
-        ]
-      );
-    }
-
-    if (sets.length === 0) {
-      return {
-        count: 0,
-        assignmentChanged: false,
-        statusChanged: false,
-        oldStatus: "",
-        newStatus: "",
-      };
-    }
-    await client.query(
-      `UPDATE service_requests
-          SET ${sets.join(", ")}, updated_at = now()
-        WHERE id = $1`,
-      params
-    );
-
-    for (const a of activities) {
-      await client.query(
-        `INSERT INTO request_activity
-           (request_id, activity_type, description, performed_by, performed_by_name)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [requestId, a.type, a.desc, actor.id, actor.name]
-      );
-    }
-    return {
-      count: activities.length,
-      assignmentChanged: assignmentChangedForNotification,
-      statusChanged: statusChangedForNotification,
-      oldStatus: oldStatusForNotification,
-      newStatus: newStatusForNotification,
-    };
-  });
-
-  if (result.assignmentChanged) {
-    void notifyAssignmentChanged(
-      requestId,
-      actor
-    );
-  }
-
-  if (result.statusChanged) {
-    void notifyStatusChanged(
-      requestId,
-      result.oldStatus,
-      result.newStatus,
-      actor
-    );
-  }
-
-  return result.count;
-}
-
-/**
- * Replaces the approver set for a request (admin/ops only). Adds new approvers,
- * removes ones no longer present, and logs an activity for each change.
- */
-export async function replaceApprovers(
-  requestId: string,
-  approvers: ApproverInput[],
-  actor: ActorRef
-): Promise<void> {
-  await withTransaction(async (client) => {
-    const existing = await client.query<{
-      approver_id: string;
-      approver_name: string;
-    }>(
-      `SELECT approver_id, approver_name FROM request_approvers WHERE request_id = $1`,
-      [requestId]
-    );
-    const existingIds = new Set(existing.rows.map((r) => r.approver_id));
-    const nextIds = new Set(approvers.map((a) => a.id));
-
-    for (const a of approvers) {
-      if (!existingIds.has(a.id)) {
-        await client.query(
-          `INSERT INTO request_approvers
-             (request_id, approver_id, approver_name, approver_email, approval_status, approval_comment)
-           VALUES ($1,$2,$3,$4,$5,$6)
-           ON CONFLICT (request_id, approver_id) DO NOTHING`,
-          [requestId, a.id, a.name, a.email, a.status ?? "Active", a.comment ?? ""]
-        );
-        await client.query(
-          `INSERT INTO request_activity
-             (request_id, activity_type, description, performed_by, performed_by_name)
-           VALUES ($1, 'Approver Added', $2, $3, $4)`,
-          [requestId, `added ${a.name} as an approver.`, actor.id, actor.name]
-        );
-        void notifyApprovalRequired(
-          requestId,
-          {
-            id: a.id,
-            name: a.name,
-            email: a.email,
-          },
-          actor
-        );
-      }
-    }
-
-    for (const e of existing.rows) {
-      if (!nextIds.has(e.approver_id)) {
-        await client.query(
-          `DELETE FROM request_approvers WHERE request_id = $1 AND approver_id = $2`,
-          [requestId, e.approver_id]
-        );
-        await client.query(
-          `INSERT INTO request_activity
-             (request_id, activity_type, description, performed_by, performed_by_name)
-           VALUES ($1, 'Approver Removed', $2, $3, $4)`,
-          [requestId, `removed ${e.approver_name} from the approvers list.`, actor.id, actor.name]
-        );
-      }
-    }
-
-    await client.query(
-      `UPDATE service_requests SET updated_at = now() WHERE id = $1`,
-      [requestId]
-    );
-  });
-}
-
-/**
- * Records an approver's own decision (status and/or comment). Only the assigned
- * approver may call this; the caller must enforce identity. Logs activity for
- * each change made.
- */
-export async function updateApproverDecision(
-  requestId: string,
-  approverId: string,
-  changes: { status?: string; comment?: string },
-  actor: ActorRef
-): Promise<boolean> {
-  return withTransaction(async (client) => {
-    const cur = await client.query<{
-      approval_status: string;
-      approval_comment: string;
-    }>(
-      `SELECT approval_status, approval_comment
-         FROM request_approvers
-        WHERE request_id = $1 AND approver_id = $2
-        FOR UPDATE`,
-      [requestId, approverId]
-    );
-    if (cur.rowCount === 0) return false;
-    const row = cur.rows[0];
-
-    const activities: { type: string; desc: string }[] = [];
-
-    if (changes.status !== undefined && changes.status !== row.approval_status) {
-      const approvedAt =
-        changes.status === "Approved" ? "now()" : "approved_at";
-      await client.query(
-        `UPDATE request_approvers
-            SET approval_status = $3, approved_at = ${approvedAt}
-          WHERE request_id = $1 AND approver_id = $2`,
-        [requestId, approverId, changes.status]
-      );
-      activities.push({
-        type: "Approval Status Updated",
-        desc:
-          changes.status === "Approved"
-            ? "approved the request."
-            : changes.status === "Rejected"
-              ? "rejected the request."
-              : changes.status === "On Hold"
-                ? "placed the approval on hold."
-                : `updated approval status to ${changes.status}.`,
-      });
-    }
-
-    if (
-      changes.comment !== undefined &&
-      changes.comment.trim() &&
-      changes.comment !== row.approval_comment
-    ) {
-      await client.query(
-        `UPDATE request_approvers
-            SET approval_comment = $3
-          WHERE request_id = $1 AND approver_id = $2`,
-        [requestId, approverId, changes.comment]
-      );
-      activities.push({
-        type: "Approval Comment Added",
-        desc: "added an approval comment.",
-      });
-    }
-
-    for (const a of activities) {
-      await client.query(
-        `INSERT INTO request_activity
-           (request_id, activity_type, description, performed_by, performed_by_name)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [requestId, a.type, a.desc, actor.id, actor.name]
-      );
-    }
-
-    if (activities.length > 0) {
-      await client.query(
-        `UPDATE service_requests SET updated_at = now() WHERE id = $1`,
-        [requestId]
-      );
-    }
-    if (
-      changes.status === "Approved" ||
-      changes.status === "Rejected"
-    ) {
-      void notifyApprovalDecision(
-        requestId,
-        changes.status,
-        actor,
-        changes.comment
-      );
-    }
-    return true;
-  });
-}
-
-export interface RequestAnalytics {
-  total: number;
-  open: number;
-  completed: number;
-  urgent: number;
-  unassigned: number;
-
-  byStatus: Record<string, number>;
-  byPriority: Record<string, number>;
-  byType: Record<string, number>;
-  byDepartment: Record<string, number>;
-
-  byAssignee: Record<string, number>;
-}
-
-export interface RecentActivityItem {
-  id: string;
-  requestId: string;
-  reference: string;
-  activityType: string;
-  description: string;
-  performedByName: string;
-  createdAt: string;
-}
-
-export interface MonthlyTrendItem {
-  month: string;
-  count: number;
-}
-
-/** Aggregated dashboard analytics computed in the database. */
-export async function getRequestAnalytics(): Promise<RequestAnalytics> {
-  const countBy = async (column: string) => {
-    const rows = await q<{ key: string | null; n: string }>(
-      `SELECT ${column} AS key, COUNT(*)::int AS n
-         FROM service_requests
-        WHERE deleted_at IS NULL
-        GROUP BY ${column}`
-    );
-    const out: Record<string, number> = {};
-    for (const row of rows) out[row.key ?? "—"] = Number(row.n);
-    return out;
-  };
-
-  const [
-    byStatus,
-    byPriority,
-    byType,
-    byDepartment,
-    byAssignee,
-    totals,
-  ] = await Promise.all([
-    countBy("status"),
-    countBy("priority"),
-    countBy("request_type"),
-    countBy("department"),
-    countBy("assigned_to_name"),
-    q1<{
-      total: string;
-      open: string;
-      completed: string;
-      urgent: string;
-      unassigned: string;
-    }>(
-      `SELECT
-  COUNT(*)::int AS total,
-  COUNT(*) FILTER (
-    WHERE status IN ('New','Assigned','In Progress','On Hold')
-  )::int AS open,
-
-  COUNT(*) FILTER (
-    WHERE status IN ('Resolved','Closed')
-  )::int AS completed,
-
-  COUNT(*) FILTER (
-    WHERE priority = 'Urgent'
-  )::int AS urgent,
-
-  COUNT(*) FILTER (
-    WHERE assigned_to_name IS NULL
-  )::int AS unassigned
-       FROM service_requests WHERE deleted_at IS NULL`
     ),
   ]);
 
   return {
-    total: Number(totals?.total ?? 0),
-    open: Number(totals?.open ?? 0),
-    completed: Number(totals?.completed ?? 0),
-    urgent: Number(totals?.urgent ?? 0),
-    unassigned: Number(totals?.unassigned ?? 0),
-
-    byStatus,
-    byPriority,
-    byType,
-    byDepartment,
-    byAssignee,
+    id: row.id,
+    reference: row.reference,
+    title: row.title,
+    status: row.status,
+    priority: row.priority,
+    requestType: row.request_type,
+    requestTypeLabel: TYPE_LABELS[row.request_type] ?? row.request_type,
+    requesterId: row.requested_by,
+    requesterName: row.requester_name,
+    requesterEmail: row.requester_email,
+    requestedForId: row.requested_for,
+    requestedForName: row.requested_for_name,
+    requestedForEmail: row.requested_for_email,
+    assignedToId: row.assigned_to,
+    assignedToName: row.assigned_to_name,
+    assignedDepartment: row.assigned_department,
+    followers: followerRows.map((f) => ({
+      id: f.user_id,
+      name: f.user_name,
+      email: f.user_email,
+    })),
+    approvers: approverRows.map((a) => ({
+      id: a.approver_id,
+      name: a.approver_name,
+      email: a.approver_email,
+    })),
   };
 }
 
-export async function getRecentActivity(
-  limit = 10
-): Promise<RecentActivityItem[]> {
-  const rows = await q<{
-    id: string;
-    request_id: string;
-    reference: string;
-    activity_type: string;
-    description: string;
-    performed_by_name: string | null;
-    created_at: string;
-  }>(
-    `
-      SELECT
-  ra.id,
-  ra.request_id,
-  sr.reference,
-  ra.activity_type,
-  ra.description,
-  ra.performed_by_name,
-  ra.created_at
-FROM request_activity ra
-INNER JOIN service_requests sr
-  ON sr.id = ra.request_id
-ORDER BY ra.created_at DESC
-LIMIT $1
-    `,
-    [limit]
-  );
+/* ------------------------------------------------------------------ */
+/* Recipient helpers                                                   */
+/* ------------------------------------------------------------------ */
 
-  return rows.map((r) => ({
-    id: r.id,
-    requestId: r.request_id,
-    reference: r.reference,
-    activityType: r.activity_type,
-    description: r.description,
-    performedByName: r.performed_by_name ?? "System",
-    createdAt: r.created_at,
-  }));
+function requesterRecipient(ctx: RequestContext): Recipient | null {
+  if (!ctx.requesterEmail) return null;
+  return { id: ctx.requesterId, name: ctx.requesterName, email: ctx.requesterEmail };
 }
 
-export async function getMonthlyRequestTrend(): Promise<
-  MonthlyTrendItem[]
-> {
-  const rows = await q<{
-    month: string;
-    count: string;
-    month_date: Date;
-  }>(
-    `
-      SELECT
-        date_trunc('month', created_at) AS month_date,
-        to_char(date_trunc('month', created_at), 'Mon YYYY') AS month,
-        COUNT(*)::int AS count
-      FROM service_requests
-      WHERE deleted_at IS NULL
-        AND created_at >= date_trunc('month', now()) - interval '5 months'
-      GROUP BY month_date, month
-      ORDER BY month_date
-    `
-  );
-
-  return rows.map((r) => ({
-    month: r.month,
-    count: Number(r.count),
-  }));
+function requestedForRecipient(ctx: RequestContext): Recipient | null {
+  if (!ctx.requestedForEmail) return null;
+  return {
+    id: ctx.requestedForId,
+    name: ctx.requestedForName ?? "",
+    email: ctx.requestedForEmail,
+  };
 }
 
-export async function listAssignees(): Promise<string[]> {
-  const rows = await q<{ assigned_to_name: string }>(
-    `SELECT DISTINCT assigned_to_name
-       FROM service_requests
-      WHERE assigned_to_name IS NOT NULL
-        AND assigned_to_name <> ''
-   ORDER BY assigned_to_name`
-  );
+/** Assignee email isn't stored on the request row, so resolve it lazily. */
+async function assigneeRecipient(ctx: RequestContext): Promise<Recipient | null> {
 
-  return rows.map((r) => r.assigned_to_name);
+  if (!ctx.assignedToId) {
+    return null;
+  }
+
+  const user = await getUserById(ctx.assignedToId);
+
+
+  if (!user?.email) {
+    return null;
+  }
+
+  return {
+    id: user.id,
+    name: user.displayName,
+    email: user.email,
+  };
+}
+
+function compact(list: (Recipient | null | undefined)[]): Recipient[] {
+  return list.filter((r): r is Recipient => Boolean(r && r.email));
+}
+
+/* ------------------------------------------------------------------ */
+/* Core dispatch                                                       */
+/* ------------------------------------------------------------------ */
+
+interface DispatchParams {
+  ctx: RequestContext;
+  type: NotificationType;
+  recipients: Recipient[];
+  inApp: (recipient: Recipient) => { title: string; message: string };
+  email: (recipient: Recipient) => EmailContent;
+}
+
+/**
+ * Deliver one notification event to every (deduplicated) recipient across all
+ * channels. Per-recipient failures are isolated and audited; they never abort
+ * the batch or bubble up to the caller.
+ */
+async function dispatch(params: DispatchParams): Promise<void> {
+  if (!(await isNotificationEnabled(params.type))) return;
+  const recipients = deduplicateRecipients(params.recipients);
+  const provider = getEmailProvider();
+
+  await Promise.all(
+    recipients.map(async (recipient) => {
+      const { title, message } = params.inApp(recipient);
+      const link = getRequestPath(params.ctx.reference);
+
+      // 1) In-app bell notification (requires a directory id).
+      if (recipient.id) {
+        try {
+          await createNotification({
+            userId: recipient.id,
+            userEmail: recipient.email,
+            type: params.type,
+            title,
+            message,
+            requestId: params.ctx.id,
+            requestReference: params.ctx.reference,
+            link,
+          });
+        } catch (error) {
+          console.error("[notifications] in-app create failed", error);
+        }
+      }
+
+      // 2) Email notification (audited in notification_log).
+      const email = params.email(recipient);
+      try {
+        const result = await provider.sendMail({
+          to: recipient.email,
+          subject: email.subject,
+          html: email.html,
+        });
+        await logDelivery({
+          requestId: params.ctx.id,
+          requestReference: params.ctx.reference,
+          channel: "email",
+          recipientEmail: recipient.email,
+          type: params.type,
+          subject: email.subject,
+          status: result.success ? "sent" : "failed",
+          errorMessage: result.error ?? null,
+        });
+      } catch (error) {
+        try {
+          await logDelivery({
+            requestId: params.ctx.id,
+            requestReference: params.ctx.reference,
+            channel: "email",
+            recipientEmail: recipient.email,
+            type: params.type,
+            subject: email.subject,
+            status: "failed",
+            errorMessage: error instanceof Error ? error.message : "send error",
+          });
+        } catch {
+          /* audit best-effort */
+        }
+      }
+
+      // 3) TODO(teams/slack/push): fan out to additional providers here.
+    })
+  );
+}
+
+/** Wrap an orchestration body so notifications never break the workflow. */
+async function safely(label: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (error) {
+    console.error(`[notifications] ${label} failed`, error);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Public events                                                       */
+/* ------------------------------------------------------------------ */
+
+/** Request Created — notify requester, requested-for, assignee and approvers. */
+export async function notifyRequestCreated(
+  requestId: string,
+  actor: ActorRef
+): Promise<void> {
+  return safely("requestCreated", async () => {
+    const ctx = await loadContext(requestId);
+    if (!ctx) return;
+    const url = getRequestUrl(ctx.reference);
+    const recipients = compact([
+      requesterRecipient(ctx),
+      requestedForRecipient(ctx),
+      await assigneeRecipient(ctx),
+      ...ctx.approvers,
+    ]);
+
+    await dispatch({
+      ctx,
+      type: "request_created",
+      recipients,
+      inApp: () => ({
+        title: "Request Submitted",
+        message: `${ctx.reference} — ${ctx.title} has been submitted.`,
+      }),
+      email: (r) =>
+        buildRequestCreatedEmail({
+          recipientName: r.name,
+          reference: ctx.reference,
+          title: ctx.title,
+          status: ctx.status,
+          priority: ctx.priority,
+          requestType: ctx.requestTypeLabel,
+          requesterName: actor.name || ctx.requesterName,
+          url,
+        }),
+    });
+  });
+}
+
+/** Approval Required — notify a single (newly added) approver. */
+export async function notifyApprovalRequired(
+  requestId: string,
+  approver: Recipient,
+  actor: ActorRef
+): Promise<void> {
+  return safely("approvalRequired", async () => {
+    const ctx = await loadContext(requestId);
+    if (!ctx || !approver.email) return;
+    const url = getRequestUrl(ctx.reference);
+
+    await dispatch({
+      ctx,
+      type: "approval_required",
+      recipients: [approver],
+      inApp: () => ({
+        title: "Approval Required",
+        message: `${ctx.reference} requires your approval.`,
+      }),
+      email: (r) =>
+        buildApprovalRequiredEmail({
+          approverName: r.name,
+          reference: ctx.reference,
+          title: ctx.title,
+          requesterName: actor.name || ctx.requesterName,
+          url,
+        }),
+    });
+  });
+}
+
+/** Approval Decision — notify requester, assignee and followers. */
+export async function notifyApprovalDecision(
+  requestId: string,
+  decision: ApprovalDecision,
+  approver: ActorRef,
+  comment?: string
+): Promise<void> {
+  return safely("approvalDecision", async () => {
+    const ctx = await loadContext(requestId);
+    if (!ctx) return;
+    const url = getRequestUrl(ctx.reference);
+    const recipients = compact([
+      requesterRecipient(ctx),
+      await assigneeRecipient(ctx),
+      ...ctx.followers,
+    ]);
+
+    await dispatch({
+      ctx,
+      type: "approval_decision",
+      recipients,
+      inApp: () => ({
+        title: decision === "Approved" ? "Request Approved" : "Request Rejected",
+        message: `${ctx.reference} was ${decision.toLowerCase()} by ${approver.name}.`,
+      }),
+      email: (r) =>
+        buildApprovalDecisionEmail({
+          recipientName: r.name,
+          reference: ctx.reference,
+          title: ctx.title,
+          decision,
+          approverName: approver.name,
+          comment,
+          url,
+        }),
+    });
+  });
+}
+
+/** Assignment Changed — notify the new assignee and the requester. */
+export async function notifyAssignmentChanged(
+  requestId: string,
+  actor: ActorRef
+): Promise<void> {
+  return safely("assignmentChanged", async () => {
+    const ctx = await loadContext(requestId);
+    if (!ctx) return;
+    const url = getRequestUrl(ctx.reference);
+    const recipients = compact([
+      await assigneeRecipient(ctx),
+      requesterRecipient(ctx),
+    ]);
+    await dispatch({
+      ctx,
+      type: "assignment_changed",
+      recipients,
+      inApp: () => ({
+        title: "Request Assigned",
+        message: `${ctx.reference} assigned${ctx.assignedToName ? ` to ${ctx.assignedToName}` : ""}.`,
+      }),
+      email: (r) =>
+        buildAssignmentEmail({
+          recipientName: r.name,
+          reference: ctx.reference,
+          title: ctx.title,
+          assigneeName: ctx.assignedToName ?? "",
+          assignedDepartment: ctx.assignedDepartment,
+          url,
+        }),
+    });
+  });
+}
+
+/** Status Changed — notify requester, requested-for and followers. */
+export async function notifyStatusChanged(
+  requestId: string,
+  oldStatus: string,
+  newStatus: string,
+  actor: ActorRef
+): Promise<void> {
+  return safely("statusChanged", async () => {
+    const ctx = await loadContext(requestId);
+    if (!ctx) return;
+    const url = getRequestUrl(ctx.reference);
+    const recipients = compact([
+      requesterRecipient(ctx),
+      requestedForRecipient(ctx),
+      ...ctx.followers,
+    ]);
+
+    await dispatch({
+      ctx,
+      type: "status_changed",
+      recipients,
+      inApp: () => ({
+        title: "Status Updated",
+        message: `${ctx.reference} moved to ${newStatus}.`,
+      }),
+      email: (r) =>
+        buildStatusEmail({
+          recipientName: r.name,
+          reference: ctx.reference,
+          title: ctx.title,
+          oldStatus,
+          newStatus,
+          actorName: actor.name,
+          url,
+        }),
+    });
+  });
+}
+
+/** Comment Added — notify requester, assignee and followers (never the author). */
+export async function notifyCommentAdded(
+  requestId: string,
+  author: ActorRef,
+  comment: string
+): Promise<void> {
+  return safely("commentAdded", async () => {
+    const ctx = await loadContext(requestId);
+    if (!ctx) return;
+    const url = getRequestUrl(ctx.reference);
+    const recipients = excludeRecipient(
+      compact([
+        requesterRecipient(ctx),
+        await assigneeRecipient(ctx),
+        ...ctx.followers,
+      ]),
+      author.email
+    );
+
+    await dispatch({
+      ctx,
+      type: "comment_added",
+      recipients,
+      inApp: () => ({
+        title: "New Comment",
+        message: `${author.name} commented on ${ctx.reference}.`,
+      }),
+      email: (r) =>
+        buildCommentEmail({
+          recipientName: r.name,
+          reference: ctx.reference,
+          title: ctx.title,
+          authorName: author.name,
+          comment,
+          url,
+        }),
+    });
+  });
+}
+
+/** Follower Added — notify a single newly added follower. */
+export async function notifyFollowerAdded(
+  requestId: string,
+  follower: Recipient,
+  actor: ActorRef
+): Promise<void> {
+  return safely("followerAdded", async () => {
+    const ctx = await loadContext(requestId);
+    if (!ctx || !follower.email) return;
+    const url = getRequestUrl(ctx.reference);
+
+    await dispatch({
+      ctx,
+      type: "follower_added",
+      recipients: [follower],
+      inApp: () => ({
+        title: "Added As Follower",
+        message: `You were added as a follower on ${ctx.reference}.`,
+      }),
+      email: (r) =>
+        buildFollowerEmail({
+          followerName: r.name,
+          reference: ctx.reference,
+          title: ctx.title,
+          addedByName: actor.name,
+          url,
+        }),
+    });
+  });
+}
+
+/**
+ * Mention — notify each mentioned user once (self-mentions excluded).
+ * Also appends a "Mention Added" activity entry per mentioned user.
+ * `mentions` is verified by the caller to actually appear in the comment text.
+ */
+export async function notifyMentions(
+  requestId: string,
+  author: ActorRef,
+  comment: string,
+  mentions: Recipient[]
+): Promise<void> {
+  return safely("mentions", async () => {
+    const ctx = await loadContext(requestId);
+    if (!ctx) return;
+    const url = getRequestUrl(ctx.reference);
+
+    const recipients = excludeRecipient(
+      deduplicateRecipients(mentions),
+      author.email
+    );
+    if (recipients.length === 0) return;
+
+    // Activity trail: one "Mention Added" entry per mentioned user.
+    for (const r of recipients) {
+      try {
+        await q(
+          `INSERT INTO request_activity
+             (request_id, activity_type, description, performed_by, performed_by_name)
+           VALUES ($1, 'Mention Added', $2, $3, $4)`,
+          [requestId, `mentioned ${r.name} in a comment.`, author.id, author.name]
+        );
+      } catch (error) {
+        console.error("[notifications] mention activity failed", error);
+      }
+    }
+
+    await dispatch({
+      ctx,
+      type: "mention",
+      recipients,
+      inApp: () => ({
+        title: "You Were Mentioned",
+        message: `${author.name} mentioned you in ${ctx.reference}.`,
+      }),
+      email: (r) =>
+        buildMentionEmail({
+          mentionedName: r.name,
+          reference: ctx.reference,
+          title: ctx.title,
+          mentionedByName: author.name,
+          comment,
+          url,
+        }),
+    });
+  });
 }
