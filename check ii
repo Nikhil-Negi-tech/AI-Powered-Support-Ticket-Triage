@@ -1,467 +1,238 @@
 "use client";
 
-import * as React from "react";
-import { useRouter } from "next/navigation";
-import { useForm, FormProvider, type DefaultValues } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { CheckCircle2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Dialog } from "@/components/ui/dialog";
+import { Controller, useFormContext } from "react-hook-form";
+import { ShieldCheck, X } from "lucide-react";
+
 import {
-  normalizeRequestQuestionAnswers,
-  validateRequestQuestionAnswers,
-  type RequestQuestionErrors,
-} from "@/lib/request-form-answers";
-import { generalRequestSchema, type GeneralRequestFormValues } from "@/lib/schema";
-import { DRAFT_STORAGE_KEY } from "@/lib/mock-data";
-import { useCurrentUser } from "@/components/hooks/useCurrentUser";
-import type {
-  RequestFormQuestion,
-  RequestQuestionAnswer,
-  RequestQuestionAnswers,
-} from "@/lib/service-categories";
-import type { AttachmentMeta } from "@/lib/types";
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 
-import { PageHeader } from "./PageHeader";
-import { RequesterInformationCard } from "./RequesterInformationCard";
-import { RequestDetailsCard } from "./RequestDetailsCard";
-import { RequestInformationCard } from "./RequestInformationCard";
-import { AttachmentsCard } from "./AttachmentsCard";
-import { ActivityTabs } from "./ActivityTabs";
+import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { UserAvatar } from "@/components/ui/user-avatar";
+
 import {
-  CustomQuestionsCard,
-  getRequestQuestionInputId,
-} from "./CustomQuestionsCard";
-import { StickyActionBar } from "./StickyActionBar";
+  DirectoryMultiPicker,
+  userPhotoUrl,
+} from "./DirectoryPickers";
 
-const EMPTY_CUSTOM_QUESTIONS: RequestFormQuestion[] = [];
-const CUSTOM_ANSWERS_DRAFT_KEY = "__customQuestionAnswers";
+import {
+  APPROVER_STATUSES,
+  type Approver,
+  type ApproverStatus,
+} from "@/lib/types";
 
-const defaultValues: DefaultValues<GeneralRequestFormValues> = {
-  requesterName: "",
-  email: "",
-  department: "",
-  manager: "",
-  officeLocation: "",
-  contactNumber: "",
-  onBehalf: false,
-  requestedFor: null,
-  title: "",
-  category: "" as GeneralRequestFormValues["category"],
-  specifyCategory: "",
-  description: { html: "", text: "" },
-  businessJustification: "",
-  businessImpact: "",
-  priority: "Medium",
-  urgentReason: "",
-  usersAffected: "",
-  assignedDepartment: "Service Desk",
-  assignedTo: null,
-  followers: [],
-  tags: [],
-  approvers: [],
+import type { GeneralRequestFormValues } from "@/lib/schema";
+import { cn } from "@/lib/utils";
+
+const STATUS_DOT: Record<ApproverStatus, string> = {
+  Active: "bg-blue-500",
+  Approved: "bg-green-500",
+  "On Hold": "bg-orange-500",
+  Cancelled: "bg-slate-400",
 };
 
-export function GeneralRequestForm({
-  formId = "general",
-  formTitle = "General Request",
-  formDescription =
-  "Submit a request that does not belong to an existing service category.",
-  questions = EMPTY_CUSTOM_QUESTIONS,
-}: {
-  formId?: string;
-  formTitle?: string;
-  formDescription?: string;
-  questions?: RequestFormQuestion[];
-}) {
-  const router = useRouter();
-  const createdAt = React.useMemo(() => new Date(), []);
-  const { user: currentUser } = useCurrentUser();
-  const draftStorageKey =
-    currentUser
-      ? `${DRAFT_STORAGE_KEY}.${currentUser.id}.${formId}`
-      : null;
-
-  const methods = useForm<GeneralRequestFormValues>({
-    resolver: zodResolver(generalRequestSchema),
-    defaultValues,
-    mode: "onBlur",
-  });
-  const resetForm = methods.reset;
-
-  const [attachments, setAttachments] = React.useState<AttachmentMeta[]>([]);
-  const [isSubmitting, setIsSubmitting] = React.useState(false);
-  const [requestId, setRequestId] = React.useState<string | null>(null);
-  const [submittedTitle, setSubmittedTitle] = React.useState("");
-  const [submitError, setSubmitError] = React.useState<string | null>(null);
-  const [draftSaved, setDraftSaved] = React.useState(false);
-  const [showCancel, setShowCancel] = React.useState(false);
-  const [showSuccess, setShowSuccess] = React.useState(false);
-  const [questionAnswers, setQuestionAnswers] =
-    React.useState<RequestQuestionAnswers>(() =>
-      normalizeRequestQuestionAnswers(questions, {})
-    );
-  const [questionErrors, setQuestionErrors] =
-    React.useState<RequestQuestionErrors>({});
-
-  React.useEffect(() => {
-    setQuestionAnswers((currentAnswers) =>
-      normalizeRequestQuestionAnswers(questions, currentAnswers)
-    );
-    setQuestionErrors({});
-  }, [questions]);
-
-  // Load any previously saved draft once on mount.
-  React.useEffect(() => {
-    if (!draftStorageKey) return;
-    try {
-      const raw = localStorage.getItem(draftStorageKey);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== "object") return;
-
-        const savedQuestionAnswers = parsed[CUSTOM_ANSWERS_DRAFT_KEY];
-        delete parsed[CUSTOM_ANSWERS_DRAFT_KEY];
-        if (typeof parsed.description === "string") {
-          parsed.description = {
-            html: parsed.description,
-            text: parsed.description,
-          };
-        }
-        resetForm({ ...defaultValues, ...parsed });
-        setQuestionAnswers(
-          normalizeRequestQuestionAnswers(questions, savedQuestionAnswers)
-        );
-      }
-    } catch {
-      // Ignore malformed drafts.
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draftStorageKey, questions, resetForm]);
-
-  // Prefill requester information from the logged-in employee directory record.
-  React.useEffect(() => {
-    if (!currentUser) return;
-    const values = methods.getValues();
-    const fill = (
-      field: keyof GeneralRequestFormValues,
-      value: string
-    ) => {
-      if (!values[field]) {
-        methods.setValue(field, value, { shouldDirty: false });
-      }
-    };
-    fill("requesterName", currentUser.name);
-    fill("email", currentUser.email);
-    fill("department", currentUser.department);
-    fill("manager", currentUser.manager);
-    fill("officeLocation", currentUser.officeLocation);
-    fill("contactNumber", currentUser.contactNumber);
-  }, [currentUser, methods]);
-
-  const handleQuestionAnswerChange = (
-    questionId: string,
-    answer: RequestQuestionAnswer
-  ) => {
-    setQuestionAnswers((currentAnswers) => ({
-      ...currentAnswers,
-      [questionId]: answer,
-    }));
-    setQuestionErrors((currentErrors) => {
-      if (!currentErrors[questionId]) return currentErrors;
-      const nextErrors = { ...currentErrors };
-      delete nextErrors[questionId];
-      return nextErrors;
-    });
-  };
-
-  const saveDraft = () => {
-    if (!draftStorageKey) return;
-    try {
-      // Attachment content is never persisted — drafts store form values only.
-      localStorage.setItem(
-        draftStorageKey,
-        JSON.stringify({
-          ...methods.getValues(),
-          [CUSTOM_ANSWERS_DRAFT_KEY]: questionAnswers,
-        })
-      );
-      setDraftSaved(true);
-      setTimeout(() => setDraftSaved(false), 2500);
-    } catch {
-      // Storage may be unavailable; fail silently for this mock.
-    }
-  };
-
-  const handleCancel = () => {
-    const hasCustomAnswers = Object.values(questionAnswers).some(
-      (answer) =>
-        answer === true ||
-        (typeof answer === "string" && answer.trim().length > 0)
-    );
-
-    if (
-      methods.formState.isDirty ||
-      attachments.length > 0 ||
-      hasCustomAnswers
-    ) {
-      setShowCancel(true);
-    } else {
-      router.push("/");
-    }
-  };
-
-  const onSubmit = async (values: GeneralRequestFormValues) => {
-    const nextQuestionErrors = validateRequestQuestionAnswers(
-      questions,
-      questionAnswers
-    );
-    const firstInvalidQuestionId = Object.keys(nextQuestionErrors)[0];
-
-    if (firstInvalidQuestionId) {
-      setQuestionErrors(nextQuestionErrors);
-      requestAnimationFrame(() => {
-        const input = document.getElementById(
-          getRequestQuestionInputId(firstInvalidQuestionId)
-        );
-        input?.scrollIntoView({ behavior: "smooth", block: "center" });
-        input?.focus();
-      });
-      return;
-    }
-
-    setQuestionErrors({});
-    const uploadingFiles = attachments.some(
-      (a) => a.status === "uploading"
-    );
-    const failedUploads = attachments.some(
-      (a) => a.status === "error"
-    );
-
-    if (failedUploads) {
-      setSubmitError(
-        "One or more attachments failed to upload. Remove them or upload again."
-      );
-      return;
-    }
-
-    if (uploadingFiles) {
-      setSubmitError(
-        "Please wait for all attachments to finish uploading."
-      );
-      return;
-    }
-    setIsSubmitting(true);
-    try {
-      const res = await fetch("/api/requests", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          requestType: formId,
-
-          attachmentIds: attachments
-            .map((a) => a.attachmentId)
-            .filter(
-              (id): id is string =>
-                typeof id === "string" && id.length > 0
-            ),
-
-          title: values.title,
-          description: values.description?.text ?? "",
-          priority: values.priority,
-          department: values.department,
-          requestedFor: values.onBehalf ? values.requestedFor : null,
-          assignedTo: values.assignedTo,
-          assignedDepartment: values.assignedDepartment,
-          approvers: values.approvers,
-          followers: values.followers,
-          payload: {
-            category: values.category,
-            specifyCategory: values.specifyCategory,
-            businessJustification: values.businessJustification,
-            businessImpact: values.businessImpact,
-            urgentReason: values.urgentReason,
-            usersAffected: values.usersAffected,
-            tags: values.tags,
-            descriptionHtml: values.description?.html ?? "",
-            customQuestions: questionAnswers,
-
-            attachments: attachments.map((file) => ({
-              attachmentId: file.attachmentId,
-              name: file.name,
-              size: file.size,
-              type: file.type,
-            })),
-          },
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error ?? "Submission failed");
-      }
-      setRequestId(data.reference);
-      setSubmittedTitle(values.title);
-      if (draftStorageKey) localStorage.removeItem(draftStorageKey);
-      setShowSuccess(true);
-    } catch (error) {
-      setSubmitError(
-        error instanceof Error ? error.message : "Submission failed. Please try again."
-      );
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
+export function ApproverPanel() {
+  const { control } =
+    useFormContext<GeneralRequestFormValues>();
 
   return (
-    <FormProvider {...methods}>
-      <form
-        onSubmit={methods.handleSubmit(onSubmit)}
-        className="mx-auto max-w-6xl px-4 py-6 sm:px-6"
-      >
-        <PageHeader
-          formTitle={formTitle}
-          formDescription={formDescription}
-        />
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <ShieldCheck className="h-4 w-4 text-primary" />
+          Approvers Panel
+        </CardTitle>
+      </CardHeader>
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-          {/* Left column (wider) */}
-          <div className="space-y-6 lg:col-span-2">
-            <RequesterInformationCard />
-            <RequestDetailsCard />
-            <CustomQuestionsCard
-              questions={questions}
-              answers={questionAnswers}
-              errors={questionErrors}
-              onAnswerChange={handleQuestionAnswerChange}
-            />
-            <AttachmentsCard files={attachments} onChange={setAttachments} />
-            <ActivityTabs />
-          </div>
+      <CardContent className="space-y-4">
+        <Controller
+          control={control}
+          name="approvers"
+          render={({ field }) => {
+            const approvers =
+              (field.value ?? []) as Approver[];
 
-          {/* Right column */}
-          <div className="space-y-6 lg:col-span-1">
-            <RequestInformationCard
-              createdAt={createdAt}
-              requestId={requestId}
-            />
-          </div>
-        </div>
+            const addPeople = (
+              people: {
+                id: string;
+                name: string;
+                email: string;
+                department: string;
+              }[]
+            ) => {
+              const existing = new Set(
+                approvers.map((a) => a.id)
+              );
 
-        <StickyActionBar
-          onCancel={handleCancel}
-          onSaveDraft={saveDraft}
-          isSubmitting={isSubmitting}
-          draftSaved={draftSaved}
-        />
-      </form>
+              const additions: Approver[] = people
+                .filter((p) => !existing.has(p.id))
+                .map((p) => ({
+                  ...p,
+                  status: "Active" as ApproverStatus,
+                  comment: "",
+                }));
 
-      {/* Cancel confirmation */}
-      <Dialog
-        open={showCancel}
-        onClose={() => setShowCancel(false)}
-        title="Discard this request?"
-        description="You have unsaved changes. If you leave now, your changes will be lost."
-        footer={
-          <>
-            <Button variant="outline" onClick={() => setShowCancel(false)}>
-              Keep Editing
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => router.push("/")}
-            >
-              Discard Changes
-            </Button>
-          </>
-        }
-      />
+              field.onChange([
+                ...approvers,
+                ...additions,
+              ]);
+            };
 
-      {/* Success message */}
-      <Dialog
-        open={showSuccess}
-        onClose={() => setShowSuccess(false)}
-        title="Request submitted"
-        hideClose
-        footer={
-          <>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setShowSuccess(false);
-                methods.reset(defaultValues);
-                setAttachments([]);
-                setRequestId(null);
-                setQuestionAnswers(
-                  normalizeRequestQuestionAnswers(questions, {})
-                );
-                setQuestionErrors({});
-              }}
-            >
-              Create Another
-            </Button>
-            <Button
-              variant="success"
-              onClick={() =>
-                router.push(
-                  `/requests/${encodeURIComponent(requestId ?? "")}`
+            const patch = (
+              id: string,
+              changes: Partial<Approver>
+            ) => {
+              field.onChange(
+                approvers.map((a) =>
+                  a.id === id
+                    ? { ...a, ...changes }
+                    : a
                 )
-              }
-            >
-              View Request
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-4">
-          <div className="flex flex-col items-center gap-3 text-center">
-            <CheckCircle2 className="h-12 w-12 text-success" />
+              );
+            };
 
-            <h3 className="text-lg font-semibold">
-              Request Submitted Successfully
-            </h3>
+            const remove = (id: string) => {
+              field.onChange(
+                approvers.filter((a) => a.id !== id)
+              );
+            };
 
-            <p className="text-sm text-muted-foreground">
-              Your request has been created and is now available for tracking.
-            </p>
-          </div>
+            return (
+              <>
+                <DirectoryMultiPicker
+                  id="approvers"
+                  value={[]}
+                  onChange={addPeople}
+                  placeholder="Search approvers by email..."
+                />
 
-          <div className="rounded-lg border border-border bg-muted/40 p-4">
-            <div className="grid gap-2 text-sm">
-              <div>
-                <span className="font-medium">Request ID:</span>{" "}
-                {requestId}
-              </div>
+                {approvers.length === 0 ? (
+                  <p className="rounded-md border border-dashed border-border px-3 py-4 text-center text-sm text-muted-foreground">
+                    No approvers added yet.
+                  </p>
+                ) : (
+                  <ul className="space-y-3">
+                    {approvers.map((approver) => (
+                      <li
+                        key={approver.id}
+                        className="rounded-lg border border-border p-3"
+                      >
+                        <div className="flex items-start gap-2.5">
+                          <UserAvatar
+                            name={approver.name}
+                            src={userPhotoUrl(
+                              approver.id
+                            )}
+                            size="md"
+                          />
 
-              <div>
-                <span className="font-medium">Title:</span>{" "}
-                {submittedTitle}
-              </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-medium text-foreground">
+                              {approver.name}
+                            </div>
 
-              <div>
-                <span className="font-medium">Status:</span> New
-              </div>
+                            <div className="truncate text-xs text-muted-foreground">
+                              {approver.email}
+                            </div>
+                          </div>
 
-              <div>
-                <span className="font-medium">Created:</span>{" "}
-                {new Date().toLocaleString()}
-              </div>
-            </div>
-          </div>
-        </div>
-      </Dialog>
+                          <button
+                            type="button"
+                            aria-label={`Remove ${approver.name}`}
+                            onClick={() =>
+                              remove(approver.id)
+                            }
+                            className="rounded p-1 text-muted-foreground hover:bg-secondary hover:text-foreground"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
 
-      {/* Submission error */}
-      <Dialog
-        open={!!submitError}
-        onClose={() => setSubmitError(null)}
-        title="Submission failed"
-        description={submitError ?? undefined}
-        footer={
-          <Button variant="outline" onClick={() => setSubmitError(null)}>
-            Close
-          </Button>
-        }
-      />
-    </FormProvider>
+                        <div className="mt-3 grid gap-3">
+                          <div>
+                            <Label
+                              htmlFor={`approver-status-${approver.id}`}
+                              className="text-xs"
+                            >
+                              Status
+                            </Label>
+
+                            <div className="relative">
+                              <span
+                                className={cn(
+                                  "pointer-events-none absolute left-3 top-1/2 h-2 w-2 -translate-y-1/2 rounded-full",
+                                  STATUS_DOT[
+                                    approver.status
+                                  ]
+                                )}
+                              />
+
+                              <Select
+                                id={`approver-status-${approver.id}`}
+                                value={approver.status}
+                                onChange={(e) =>
+                                  patch(
+                                    approver.id,
+                                    {
+                                      status:
+                                        e.target
+                                          .value as ApproverStatus,
+                                    }
+                                  )
+                                }
+                                className="pl-7"
+                              >
+                                {APPROVER_STATUSES.map(
+                                  (status) => (
+                                    <option
+                                      key={status}
+                                      value={status}
+                                    >
+                                      {status}
+                                    </option>
+                                  )
+                                )}
+                              </Select>
+                            </div>
+                          </div>
+
+                          <div>
+                            <Label
+                              htmlFor={`approver-comment-${approver.id}`}
+                              className="text-xs"
+                            >
+                              Comment
+                            </Label>
+
+                            <Textarea
+                              id={`approver-comment-${approver.id}`}
+                              rows={2}
+                              maxLength={500}
+                              placeholder="Add a short review note..."
+                              value={approver.comment ?? ""}
+                              onChange={(e) =>
+                                patch(approver.id, {
+                                  comment:
+                                    e.target.value,
+                                })
+                              }
+                            />
+                          </div>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            );
+          }}
+        />
+      </CardContent>
+    </Card>
   );
 }
