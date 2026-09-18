@@ -1,119 +1,587 @@
-"use client";
-
-import * as React from "react";
-import { Send, Loader2, MessageSquare } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { MentionText, Textarea } from "@/components/ui/textarea";
-import { UserAvatar } from "@/components/ui/user-avatar";
-import { EmptyState } from "@/components/ui/empty-state";
-import { formatDateTime } from "@/lib/utils";
-
-interface Comment {
+/**
+ * Ordered, versioned SQL migrations. Each runs once inside a transaction and is
+ * recorded in `schema_migrations`. Never edit an applied migration — add a new
+ * one. Migrations must be idempotent-safe (use IF NOT EXISTS where possible).
+ */
+export interface Migration {
   id: string;
-  author_name: string;
-  comment: string;
-  created_at: string;
+  sql: string;
 }
 
-export function RequestComments({
-  reference,
-  initialComments,
-}: {
-  reference: string;
-  initialComments: Comment[];
-}) {
-  const [comments, setComments] =
-    React.useState<Comment[]>(initialComments);
-  const [draft, setDraft] = React.useState("");
-  const [posting, setPosting] = React.useState(false);
+export const MIGRATIONS: Migration[] = [
+  {
+    id: "001_core_schema",
+    sql: /* sql */ `
+      -- ================================================================
+      -- Organization users (synced from Microsoft Entra ID)
+      -- ================================================================
 
-  const add = async () => {
-    const body = draft.trim();
-    if (!body) return;
-
-    setPosting(true);
-    try {
-      const res = await fetch(
-        `/api/requests/${encodeURIComponent(reference)}/comments`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ comment: body }),
-        }
+      CREATE TABLE IF NOT EXISTS organization_users (
+        id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL DEFAULT '',
+        email TEXT NOT NULL,
+        department TEXT NOT NULL DEFAULT '',
+        job_title TEXT NOT NULL DEFAULT '',
+        office_location TEXT NOT NULL DEFAULT '',
+        contact_number TEXT NOT NULL DEFAULT '',
+        manager_name TEXT NOT NULL DEFAULT 'N/A',
+        manager_email TEXT NOT NULL DEFAULT 'N/A',
+        profile_photo_url TEXT NOT NULL DEFAULT '',
+        account_status TEXT NOT NULL DEFAULT 'active',
+        last_synced_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
 
-      const data = await res.json();
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_org_users_email
+        ON organization_users (lower(email));
 
-      if (res.ok && data.success) {
-        setComments((prev) => [...prev, data.comment]);
-        setDraft("");
-      }
-    } finally {
-      setPosting(false);
-    }
-  };
+      CREATE INDEX IF NOT EXISTS ix_org_users_department
+        ON organization_users (lower(department));
 
-  return (
-    <div className="space-y-4">
-      {/* Input */}
-      <div className="flex gap-3">
-        <div className="flex-1">
-          <Textarea
-            rows={3}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="Add a comment…"
-          />
-          <div className="mt-2 flex justify-end">
-            <Button
-              size="sm"
-              onClick={add}
-              disabled={posting || !draft.trim()}
-            >
-              {posting ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Send className="h-4 w-4" />
-              )}
-              Add Comment
-            </Button>
-          </div>
-        </div>
-      </div>
+      CREATE INDEX IF NOT EXISTS ix_org_users_status
+        ON organization_users (account_status);
 
-      {/* Comments List */}
-      {comments.length === 0 ? (
-        <EmptyState
-          icon={MessageSquare}
-          title="No comments yet"
-          description="Start the discussion by adding the first comment."
-          className="py-8"
-        />
-      ) : (
-        <ul className="space-y-3">
-          {comments.map((c) => (
-            <li key={c.id} className="flex gap-3">
-              <UserAvatar name={c.author_name} size="md" />
+      CREATE INDEX IF NOT EXISTS ix_org_users_name
+        ON organization_users (lower(display_name));
 
-              <div className="flex-1 rounded-lg border border-border bg-muted/40 px-3 py-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-semibold text-foreground">
-                    {c.author_name}
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    {formatDateTime(new Date(c.created_at))}
-                  </span>
-                </div>
 
-                <MentionText
-                  text={c.comment}
-                  className="mt-1 block whitespace-pre-wrap text-sm text-foreground"
-                />
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
+      -- ================================================================
+      -- Role-based access control (identity = email, passwordless)
+      -- ================================================================
+
+      CREATE TABLE IF NOT EXISTS user_roles (
+        id BIGSERIAL PRIMARY KEY,
+        user_email TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'Admin',
+        granted_by TEXT NOT NULL DEFAULT 'system',
+        granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT uq_user_role UNIQUE (user_email, role)
+      );
+
+      CREATE INDEX IF NOT EXISTS ix_user_roles_email
+        ON user_roles (lower(user_email));
+
+
+      -- ================================================================
+      -- Service requests (all types)
+      -- ================================================================
+
+      CREATE TABLE IF NOT EXISTS service_requests (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        reference TEXT NOT NULL UNIQUE,
+        request_type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'Draft',
+        priority TEXT NOT NULL DEFAULT 'Medium',
+
+        requested_by TEXT,
+        requester_name TEXT NOT NULL DEFAULT '',
+        requester_email TEXT NOT NULL DEFAULT '',
+
+        requested_for TEXT,
+        requested_for_name TEXT,
+        requested_for_email TEXT,
+
+        department TEXT NOT NULL DEFAULT '',
+        assigned_to TEXT,
+        assigned_to_name TEXT,
+
+        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        completed_at TIMESTAMPTZ,
+        deleted_at TIMESTAMPTZ
+      );
+
+      CREATE INDEX IF NOT EXISTS ix_requests_status
+        ON service_requests (status);
+
+      CREATE INDEX IF NOT EXISTS ix_requests_type
+        ON service_requests (request_type);
+
+      CREATE INDEX IF NOT EXISTS ix_requests_department
+        ON service_requests (lower(department));
+
+      CREATE INDEX IF NOT EXISTS ix_requests_requested_by
+        ON service_requests (requested_by);
+
+      CREATE INDEX IF NOT EXISTS ix_requests_assigned_to
+        ON service_requests (assigned_to);
+
+      CREATE INDEX IF NOT EXISTS ix_requests_created_at
+        ON service_requests (created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS ix_requests_active
+        ON service_requests (created_at DESC)
+        WHERE deleted_at IS NULL;
+
+
+      -- ================================================================
+      -- Approval workflow (1..N approvers per request)
+      -- ================================================================
+
+      CREATE TABLE IF NOT EXISTS request_approvers (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        request_id UUID NOT NULL
+          REFERENCES service_requests(id) ON DELETE CASCADE,
+
+        approver_id TEXT NOT NULL,
+        approver_name TEXT NOT NULL DEFAULT '',
+        approver_email TEXT NOT NULL DEFAULT '',
+
+        approval_status TEXT NOT NULL DEFAULT 'Active',
+        approval_comment TEXT NOT NULL DEFAULT '',
+        approved_at TIMESTAMPTZ,
+
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+        CONSTRAINT uq_request_approver
+          UNIQUE (request_id, approver_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS ix_approvers_request
+        ON request_approvers (request_id);
+
+
+      -- ================================================================
+      -- Assignment history
+      -- ================================================================
+
+      CREATE TABLE IF NOT EXISTS request_assignments (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        request_id UUID NOT NULL
+          REFERENCES service_requests(id) ON DELETE CASCADE,
+
+        assigned_to TEXT,
+        assigned_to_name TEXT,
+        assigned_department TEXT NOT NULL DEFAULT '',
+        assigned_by TEXT,
+        assigned_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS ix_assignments_request
+        ON request_assignments (request_id);
+
+
+      -- ================================================================
+      -- Followers / watchers
+      -- ================================================================
+
+      CREATE TABLE IF NOT EXISTS request_followers (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        request_id UUID NOT NULL
+          REFERENCES service_requests(id) ON DELETE CASCADE,
+
+        user_id TEXT NOT NULL,
+        user_name TEXT NOT NULL DEFAULT '',
+        user_email TEXT NOT NULL DEFAULT '',
+        added_by TEXT,
+        added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+        CONSTRAINT uq_request_follower
+          UNIQUE (request_id, user_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS ix_followers_request
+        ON request_followers (request_id);
+
+      CREATE INDEX IF NOT EXISTS ix_followers_user
+        ON request_followers (user_id);
+
+
+      -- ================================================================
+      -- Comments (chronological)
+      -- ================================================================
+
+      CREATE TABLE IF NOT EXISTS request_comments (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        request_id UUID NOT NULL
+          REFERENCES service_requests(id) ON DELETE CASCADE,
+
+        user_id TEXT,
+        author_name TEXT NOT NULL DEFAULT '',
+        comment TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS ix_comments_request
+        ON request_comments (request_id, created_at);
+
+
+      -- ================================================================
+      -- Activity timeline / audit trail (never deleted)
+      -- ================================================================
+
+      CREATE TABLE IF NOT EXISTS request_activity (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        request_id UUID NOT NULL
+          REFERENCES service_requests(id) ON DELETE CASCADE,
+
+        activity_type TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        performed_by TEXT,
+        performed_by_name TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS ix_activity_request
+        ON request_activity (request_id, created_at);
+
+
+      -- ================================================================
+      -- Directory sync statistics (singleton row)
+      -- ================================================================
+
+      CREATE TABLE IF NOT EXISTS sync_meta (
+        id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        last_sync_at TIMESTAMPTZ,
+        added INT NOT NULL DEFAULT 0,
+        updated INT NOT NULL DEFAULT 0,
+        removed INT NOT NULL DEFAULT 0,
+        total INT NOT NULL DEFAULT 0
+      );
+    `,
+  },
+
+  {
+    id: "002_seed_default_admins",
+    sql: /* sql */ `
+      INSERT INTO user_roles (user_email, role, granted_by)
+      VALUES
+        ('nikhil.negi@fareportal.com', 'Admin', 'system'),
+        ('aryaman.sharma@fareportal.com', 'Admin', 'system'),
+        ('itsmautomation@fareportal.com', 'Admin', 'system')
+      ON CONFLICT (user_email, role) DO NOTHING;
+    `,
+  },
+
+  {
+    id: "003_request_reference_sequence",
+    sql: /* sql */ `
+      CREATE SEQUENCE IF NOT EXISTS request_reference_seq START 1000;
+    `,
+  },
+
+  {
+    id: "004_request_department_columns",
+    sql: /* sql */ `
+      ALTER TABLE service_requests
+        ADD COLUMN IF NOT EXISTS requester_department
+          TEXT NOT NULL DEFAULT '',
+        ADD COLUMN IF NOT EXISTS requested_for_department
+          TEXT NOT NULL DEFAULT '';
+    `,
+  },
+
+  {
+    id: "005_request_assigned_department",
+    sql: /* sql */ `
+      ALTER TABLE service_requests
+        ADD COLUMN IF NOT EXISTS assigned_department
+          TEXT NOT NULL DEFAULT '';
+    `,
+  },
+
+  {
+    id: "006_request_attachments",
+    sql: /* sql */ `
+      CREATE TABLE IF NOT EXISTS request_attachments (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+        request_id UUID
+          REFERENCES service_requests(id)
+          ON DELETE CASCADE,
+
+        file_name TEXT NOT NULL,
+        file_type TEXT NOT NULL,
+        file_size BIGINT NOT NULL,
+
+        file_data BYTEA NOT NULL,
+
+        uploaded_by TEXT NOT NULL DEFAULT '',
+        uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS ix_request_attachments_request
+        ON request_attachments (request_id);
+    `,
+  },
+
+  {
+    id: "007_attachment_nullable_request",
+    sql: /* sql */ `
+      ALTER TABLE request_attachments
+        ALTER COLUMN request_id DROP NOT NULL;
+    `,
+  },
+
+  {
+    id: "008_notifications",
+    sql: /* sql */ `
+      -- ================================================================
+      -- In-app notifications (bell dropdown / notification center)
+      -- ================================================================
+
+      CREATE TABLE IF NOT EXISTS notifications (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+        user_id TEXT NOT NULL,
+        user_email TEXT NOT NULL DEFAULT '',
+
+        notification_type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL DEFAULT '',
+
+        request_id UUID
+          REFERENCES service_requests(id)
+          ON DELETE CASCADE,
+
+        request_reference TEXT,
+        link TEXT,
+
+        actor_name TEXT NOT NULL DEFAULT '',
+
+        is_read BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        read_at TIMESTAMPTZ
+      );
+
+      CREATE INDEX IF NOT EXISTS ix_notifications_user
+        ON notifications (user_id, created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS ix_notifications_unread
+        ON notifications (user_id)
+        WHERE is_read = FALSE;
+    `,
+  },
+
+  {
+    id: "009_notification_log",
+    sql: /* sql */ `
+      -- ================================================================
+      -- Notification delivery audit log (email/teams observability)
+      -- ================================================================
+
+      CREATE TABLE IF NOT EXISTS notification_log (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+        request_id UUID
+          REFERENCES service_requests(id)
+          ON DELETE SET NULL,
+
+        request_reference TEXT,
+
+        channel TEXT NOT NULL DEFAULT 'email',
+
+        recipient_email TEXT NOT NULL DEFAULT '',
+
+        notification_type TEXT NOT NULL,
+
+        subject TEXT NOT NULL DEFAULT '',
+
+        status TEXT NOT NULL DEFAULT 'pending',
+
+        error_message TEXT,
+
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        sent_at TIMESTAMPTZ
+      );
+
+      CREATE INDEX IF NOT EXISTS ix_notification_log_request
+        ON notification_log (request_id, created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS ix_notification_log_status
+        ON notification_log (status);
+    `,
+  },
+
+  {
+    id: "010_administration_center",
+    sql: /* sql */ `
+      CREATE TABLE IF NOT EXISTS admin_departments (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT NOT NULL,
+        code TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT uq_admin_department_code UNIQUE (code)
+      );
+      CREATE INDEX IF NOT EXISTS ix_admin_departments_active ON admin_departments (is_active, name);
+
+      CREATE TABLE IF NOT EXISTS admin_categories (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        parent_id UUID REFERENCES admin_categories(id) ON DELETE SET NULL,
+        description TEXT NOT NULL DEFAULT '',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT uq_admin_category_slug UNIQUE (slug)
+      );
+      CREATE INDEX IF NOT EXISTS ix_admin_categories_parent ON admin_categories (parent_id, is_active, name);
+
+      CREATE TABLE IF NOT EXISTS approval_policies (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT NOT NULL,
+        request_type TEXT NOT NULL DEFAULT '*',
+        department_code TEXT,
+        priority TEXT,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS ix_approval_policies_match ON approval_policies (request_type, department_code, priority, is_active);
+
+      CREATE TABLE IF NOT EXISTS approval_policy_steps (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        policy_id UUID NOT NULL REFERENCES approval_policies(id) ON DELETE CASCADE,
+        step_order INT NOT NULL,
+        name TEXT NOT NULL,
+        approver_type TEXT NOT NULL,
+        approver_value TEXT NOT NULL,
+        timeout_hours INT NOT NULL DEFAULT 48,
+        escalation_value TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT uq_approval_policy_step UNIQUE (policy_id, step_order)
+      );
+
+      CREATE TABLE IF NOT EXISTS admin_permissions (
+        role TEXT NOT NULL,
+        permission TEXT NOT NULL,
+        granted BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_by TEXT NOT NULL DEFAULT '',
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (role, permission)
+      );
+      INSERT INTO admin_permissions (role, permission) VALUES
+        ('User', 'requests.view'), ('Approver', 'requests.view'), ('Approver', 'approvals.decide'),
+        ('Manager', 'requests.view'), ('Manager', 'approvals.decide'), ('Admin', 'admin.view'),
+        ('Admin', 'users.manage'), ('Admin', 'forms.manage'), ('Admin', 'workflows.manage'),
+        ('Admin', 'reports.export'), ('Admin', 'settings.manage'), ('Super Admin', 'admin.manage'),
+        ('Super Admin', 'rbac.manage') ON CONFLICT (role, permission) DO NOTHING;
+
+      CREATE TABLE IF NOT EXISTS admin_audit_logs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        actor_id TEXT,
+        actor_email TEXT NOT NULL DEFAULT '',
+        action TEXT NOT NULL,
+        resource_type TEXT NOT NULL,
+        resource_id TEXT,
+        old_value JSONB,
+        new_value JSONB,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS ix_admin_audit_created ON admin_audit_logs (created_at DESC);
+      CREATE INDEX IF NOT EXISTS ix_admin_audit_resource ON admin_audit_logs (resource_type, resource_id);
+      CREATE INDEX IF NOT EXISTS ix_admin_audit_actor ON admin_audit_logs (lower(actor_email));
+    `,
+  },
+
+  {
+    id: "011_metadata_platform",
+    sql: /* sql */ `
+      CREATE TABLE IF NOT EXISTS request_form_definitions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        form_key TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'draft',
+        active_version INT NOT NULL DEFAULT 1,
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT uq_request_form_key UNIQUE (form_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS request_form_versions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        form_id UUID NOT NULL REFERENCES request_form_definitions(id) ON DELETE CASCADE,
+        version INT NOT NULL,
+        definition JSONB NOT NULL DEFAULT '{}'::jsonb,
+        status TEXT NOT NULL DEFAULT 'draft',
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT uq_request_form_version UNIQUE (form_id, version)
+      );
+
+      CREATE TABLE IF NOT EXISTS workflow_definitions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        workflow_key TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        request_type TEXT NOT NULL DEFAULT '*',
+        status TEXT NOT NULL DEFAULT 'draft',
+        active_version INT NOT NULL DEFAULT 1,
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS workflow_versions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        workflow_id UUID NOT NULL REFERENCES workflow_definitions(id) ON DELETE CASCADE,
+        version INT NOT NULL,
+        definition JSONB NOT NULL DEFAULT '{}'::jsonb,
+        status TEXT NOT NULL DEFAULT 'draft',
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT uq_workflow_version UNIQUE (workflow_id, version)
+      );
+
+      CREATE TABLE IF NOT EXISTS notification_definitions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        event_key TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        channels JSONB NOT NULL DEFAULT '["in-app"]'::jsonb,
+        template JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_by TEXT NOT NULL DEFAULT '',
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS report_definitions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT NOT NULL,
+        report_key TEXT NOT NULL UNIQUE,
+        definition JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS portal_settings (
+        setting_key TEXT PRIMARY KEY,
+        setting_value JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_by TEXT NOT NULL DEFAULT '',
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_flags (
+        flag_key TEXT PRIMARY KEY,
+        enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        description TEXT NOT NULL DEFAULT '',
+        updated_by TEXT NOT NULL DEFAULT '',
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS user_permission_overrides (
+        user_id TEXT NOT NULL,
+        permission TEXT NOT NULL,
+        granted BOOLEAN NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        updated_by TEXT NOT NULL DEFAULT '',
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (user_id, permission)
+      );
+    `,
+  },
+];
