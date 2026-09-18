@@ -1,165 +1,130 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
-import { AlertTriangle, Check, Loader2, Send } from "lucide-react";
-
+import { Send, Loader2, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Select } from "@/components/ui/select";
+import { MentionText, Textarea } from "@/components/ui/textarea";
+import { UserAvatar } from "@/components/ui/user-avatar";
+import { EmptyState } from "@/components/ui/empty-state";
+import { formatDateTime } from "@/lib/utils";
 
-interface Props {
-  reference: string;
-  currentStatus: string;
-  currentComment: string;
+interface Comment {
+  id: string;
+  author_name: string;
+  comment: string;
+  created_at: string;
 }
 
-export function ApproverDecisionPanel({
+export function RequestComments({
   reference,
-  currentStatus,
-  currentComment,
-}: Props) {
-  const router = useRouter();
-
-  const [status, setStatus] = React.useState(currentStatus);
-  const [comment, setComment] = React.useState(currentComment);
-
-  const [saving, setSaving] = React.useState(false);
-  const [saved, setSaved] = React.useState(false);
+  initialComments,
+}: {
+  reference: string;
+  initialComments: Comment[];
+}) {
+  const [comments, setComments] =
+    React.useState<Comment[]>(initialComments);
+  const [draft, setDraft] = React.useState("");
+  const [posting, setPosting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
-  const dirty =
-    status !== currentStatus || comment !== currentComment;
+  const add = async () => {
+    const body = draft.trim();
+    if (!body) return;
 
-  async function handleSave() {
-    setSaving(true);
+    setPosting(true);
     setError(null);
-    setSaved(false);
-
     try {
       const res = await fetch(
-        `/api/requests/${encodeURIComponent(reference)}/approvers`,
+        `/api/requests/${encodeURIComponent(reference)}/comments`,
         {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            status,
-            comment,
-          }),
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ comment: body }),
         }
       );
 
-      if (!res.ok) {
-        const data = (await res
-          .json()
-          .catch(() => ({}))) as {
-          error?: string;
-        };
+      const data = await res.json();
 
-        throw new Error(
-          data.error ?? "Failed to save decision"
-        );
+      if (res.ok && data.success) {
+        setComments((prev) => [...prev, data.comment]);
+        setDraft("");
+      } else {
+        setError(data.error ?? "Unable to add comment. Please try again.");
       }
-
-      setSaved(true);
-      router.refresh();
-    } catch (e) {
-      setError(
-        e instanceof Error
-          ? e.message
-          : "Failed to save decision"
-      );
+    } catch {
+      setError("Unable to add comment. Check your connection and try again.");
     } finally {
-      setSaving(false);
+      setPosting(false);
     }
-  }
+  };
 
   return (
     <div className="space-y-5">
-      <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 text-xs leading-5 text-muted-foreground">
-        Your decision is recorded in the request history and may trigger notifications to the requester and support team.
-      </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="approval-status">
-          Approval Status
-        </Label>
-
-        <Select
-          id="approval-status"
-          value={status}
-          onChange={(e) => {
-            setStatus(e.target.value);
-            setSaved(false);
-          }}
-        >
-          <option value="Active">Active</option>
-
-          <option value="Approved">
-            Approved
-          </option>
-
-          <option value="On Hold">
-            On Hold
-          </option>
-
-          <option value="Cancelled">
-            Cancelled
-          </option>
-        </Select>
-      </div>
-
-      {status === "Cancelled" && (
-        <div className="flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2.5 text-xs leading-5 text-destructive">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-          Cancelling this approval will stop your approval step. Add a comment explaining the decision.
+      {/* Input */}
+      <div className="rounded-lg border border-border bg-muted/20 p-3">
+        <div className="flex-1">
+          <Textarea
+            rows={3}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="Add a comment…"
+          />
+          <div className="mt-2 flex justify-end">
+            <Button
+              size="sm"
+              onClick={add}
+              disabled={posting || !draft.trim()}
+            >
+              {posting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+              Add Comment
+            </Button>
+          </div>
         </div>
-      )}
-
-      <div className="space-y-1.5">
-        <Label htmlFor="approval-comment">
-          Approval Comment
-        </Label>
-
-        <textarea
-          id="approval-comment"
-          rows={4}
-          value={comment}
-          onChange={(e) => {
-            setComment(e.target.value);
-            setSaved(false);
-          }}
-          placeholder="Add approval comments..."
-          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-        />
       </div>
-
       {error && (
-        <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
           {error}
         </p>
       )}
 
-      {saved && !dirty && (
-        <p className="flex items-center gap-1.5 rounded-md bg-success/10 px-3 py-2 text-sm text-success">
-          <Check className="h-4 w-4" />
-          Decision saved successfully.
-        </p>
+      {/* Comments List */}
+      {comments.length === 0 ? (
+        <EmptyState
+          icon={MessageSquare}
+          title="No comments yet"
+          description="Start the discussion by adding the first comment."
+          className="py-8"
+        />
+      ) : (
+        <ul className="space-y-3">
+          {comments.map((c) => (
+            <li key={c.id} className="flex gap-3">
+              <UserAvatar name={c.author_name} size="md" />
+
+              <div className="flex-1 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold text-foreground">
+                    {c.author_name}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {formatDateTime(new Date(c.created_at))}
+                  </span>
+                </div>
+
+                <MentionText
+                  text={c.comment}
+                  className="mt-1 block whitespace-pre-wrap text-sm text-foreground"
+                />
+              </div>
+            </li>
+          ))}
+        </ul>
       )}
-
-      <Button
-        onClick={handleSave}
-        disabled={saving || !dirty}
-        className="w-full"
-      >
-        {saving && (
-          <Loader2 className="h-4 w-4 animate-spin" />
-        )}
-
-        {!saving && <Send className="h-4 w-4" />}
-        {saving ? "Saving decision…" : "Save Decision"}
-      </Button>
     </div>
   );
 }
